@@ -5,19 +5,28 @@ from typing import Sequence
 
 
 def positions_to_velocity(
-    positions_mm: Sequence[tuple[float, float]], fps: float = 240.0
+    positions_mm: Sequence[tuple[float, float]],
+    fps: float = 240.0,
+    times_s: Sequence[float] | None = None,
 ) -> tuple[float, float]:
     """
     Linear regression fit over (x_mm, y_mm) time series.
     Returns (vx_mps, vy_mps). y is already sign-corrected (positive = up).
+
+    Pass times_s (seconds) for variable frame rate clips; otherwise uniform 1/fps spacing.
     """
     n = len(positions_mm)
     if n < 2:
         raise ValueError(f"Need at least 2 positions, got {n}")
 
-    # Time steps: 0, 1/fps, 2/fps, ...
-    dt = 1.0 / fps
-    times = [i * dt for i in range(n)]
+    if times_s is not None:
+        times = list(times_s)
+        # Normalise so first timestamp = 0
+        t0 = times[0]
+        times = [t - t0 for t in times]
+    else:
+        dt = 1.0 / fps
+        times = [i * dt for i in range(n)]
 
     # Linear regression for x(t) and y(t) independently
     vx_mps = _linear_slope(times, [p[0] for p in positions_mm]) / 1000.0  # mm/s → m/s
