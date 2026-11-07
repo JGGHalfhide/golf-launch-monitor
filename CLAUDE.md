@@ -119,6 +119,32 @@ The sim's `spinAxis` field controls draw/fade/straight. Currently hardcoded to 0
 
 This won't be measured (that requires two cameras or spin dots) but a plausible statistical distribution will make course play feel realistic rather than always hitting dead straight.
 
+## Planned: Contact Quality Score → Dispersion Scaling
+
+**Idea:** derive a contact quality score from the measured VLA and ball speed vs. what's expected for the club. A mis-hit shows up as an inconsistency between these two — not just an unusual value in isolation, but the *combination* being off.
+
+**Physics note (needs research to confirm):** the clearest mis-hit signatures are likely:
+
+| Pattern | What it probably means | Dispersion effect |
+|---|---|---|
+| Low ball speed + VLA near normal | Fat/chunked — energy lost in ground | High — unpredictable direction |
+| Normal ball speed + VLA much lower than expected | Thin/skull — struck equator of ball | High — low flight, runs |
+| Normal ball speed + VLA much higher than expected | Toe or heel strike (gear effect can raise launch) | Moderate — offline tendency |
+| Ball speed and VLA both close to expected | Solid centre contact | Low dispersion |
+
+A high VLA *with* high ball speed on a 7i specifically is worth researching — it may actually indicate a good strike (more compression = higher flight) rather than a mis-hit. The key signal is probably the *ratio* of VLA deviation to ball speed deviation rather than either alone.
+
+**Implementation sketch:**
+
+```python
+# z-score of VLA deviation from club's expected VLA, normalised by ball speed
+contact_score = 1.0 - clamp(abs(vla - expected_vla) / vla_sigma, 0, 1)
+# 1.0 = pure centre contact, 0.0 = severe mis-hit
+# spinAxis sigma for the club then scales by (1 / contact_score)
+```
+
+**Data needed:** per-club VLA standard deviation for amateurs (Trackman or similar). Research before building.
+
 ## Planned: Shot Streaming Workflow for a Round
 
 For a full round, every shot needs to flow: record clip → transfer to Mac → pipeline → relay → sim.
