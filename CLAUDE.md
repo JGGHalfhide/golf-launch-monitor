@@ -90,7 +90,7 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 |---|---|
 | Project scaffold | Done |
 | `docs/sim-protocol.md` | Done (framing confirmed; ack/errors unverified) |
-| `tools/send_fake_shot.py` | Done — test it: `python tools/send_fake_shot.py` |
+| `tools/send_fake_shot.py` | Done — confirmed working, ball flies (255 yd / 235 carry / 78 ft apex at 150 mph, 12° VLA) |
 | Relay service (`relay/`) | Not started |
 | Vision pipeline (`vision/`) | Not started |
 | Calibration + sample clips | Not started |

@@ -125,8 +125,25 @@ No error messages observed. No explicit ack for the device-ready message.
 
 ## Operation Order
 
-1. TCP connect to port 3111
+**CONFIRMED (live test 2026-11-07, native desktop app required — web version does not expose port 3111):**
+
+1. TCP connect to port 3111 (native desktop app must be running)
 2. Send `{"type":"device","status":"ready"}\n`
 3. Send shot message (newline-terminated)
-4. Read lines from socket — expect "player" event (club info) and "result" event after ball lands
-5. Repeat from step 2 for next shot
+4. Sim echoes shot back as `{"type":"shot","shot":{...}}\n`
+5. Ball flies; sim sends `"result"` event when ball lands
+6. Repeat from step 2 for next shot
+
+**Note on "player" events:** The sim does NOT push a "player" event proactively on connection. It fires one when club selection or player position changes. The shot is accepted without waiting for a "player" event — send device-ready then shot directly.
+
+## Live Test Results (2026-11-07)
+
+Shot: 150 mph, 12° VLA, 0° HLA, 2800 rpm, 0° axis
+
+| Metric | Value |
+|---|---|
+| Total distance | 255 yd |
+| Carry | 235 yd |
+| Apex | 78 ft |
+
+Result event not captured yet (script timed out before result arrived in earlier test with wrong app). To be confirmed with updated script.
