@@ -38,12 +38,8 @@ tests/      pytest suite — all math functions must have tests
 ## Commands
 
 ```bash
-# Setup (uv)
-uv venv && source .venv/bin/activate
-uv pip install -e ".[dev]"
-
-# Setup (plain venv)
-python3.12 -m venv .venv && source .venv/bin/activate
+# Setup — must use Python 3.13 (opencv doesn't support 3.14 yet)
+/opt/homebrew/opt/python@3.13/bin/python3.13 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Run tests
@@ -62,6 +58,11 @@ python -m vision <path/to/clip.mov>                        # auto-calibrate
 python -m vision <path/to/clip.mov> --calib 5.2           # supply px/mm manually
 python -m vision <path/to/clip.mov> --output debug.mp4    # write overlay video
 python -m vision <path/to/clip.mov> --fps 240             # explicit frame rate
+
+# Process a clip and send to sim (relay must be running)
+python tools/clip_to_sim.py samples/<clip.mov>                   # auto-detects club from relay
+python tools/clip_to_sim.py samples/<clip.mov> --club "7 Iron"   # override club
+python tools/clip_to_sim.py samples/<clip.mov> --dry-run         # print shot, don't send
 ```
 
 ## Sim Protocol Summary
@@ -88,19 +89,48 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 
 ## Current Phase
 
-**Phase 1 — Protocol confirmed, fake shot tool ready.**
+**Phase 2 — End-to-end pipeline working. Shot data flows from real iPhone clip → sim.**
 
 | Item | Status |
 |---|---|
 | Project scaffold | Done |
-| `docs/sim-protocol.md` | Done (framing confirmed; ack/errors unverified) |
-| `tools/send_fake_shot.py` | Done — confirmed working, ball flies (255 yd / 235 carry / 78 ft apex at 150 mph, 12° VLA) |
-| Relay service (`relay/`) | Done — HTTP :3001, forwards to sim, logs to logs/shots.jsonl |
-| Vision pipeline (`vision/`) | Done (offline) |
-| Calibration + sample clips | Not started |
-| Horizontal direction | Not started |
-| Spin measurement | Not started |
-| Live iPhone capture app | Not started |
+| `docs/sim-protocol.md` | Done — protocol fully confirmed incl. 200ms delay between device-ready and shot |
+| `tools/send_fake_shot.py` | Done — confirmed working (255 yd / 235 carry / 78 ft apex at 150 mph, 12° VLA) |
+| Relay service (`relay/`) | Done — HTTP :3001 → TCP :3111, logs shots.jsonl, tracks current club from sim player events |
+| Vision pipeline (`vision/`) | Done — background subtraction, directional constraints, linear regression over real timestamps |
+| Auto-calibration | Done — px/mm from ball diameter in pre-impact frame |
+| `tools/clip_to_sim.py` | Done — full end-to-end: clip → vision → relay → sim; confirmed working (76 mph / 30° VLA / 101 yd) |
+| Spin estimation | Done — club-aware model: per-club base spin + VLA deviation adjustment (200 rpm/deg) |
+| Horizontal launch angle | Not started — always 0; needs side-spin / direction tracking |
+| Spin axis (side spin) | **Planned** — statistical model correlating club, ball speed, and VLA (see below) |
+| Shot streaming for a round | **Planned** — workflow TBD; need to solve clip transfer (USB vs WiFi) and folder-watcher automation |
+| Live iPhone capture | Not started |
+
+## Planned: Spin Axis (Side Spin) Model
+
+The sim's `spinAxis` field controls draw/fade/straight. Currently hardcoded to 0 (straight).
+
+**Goal:** build a statistical estimator for spin axis using club, ball speed, and VLA as inputs — similar to how `spinSpeed` is estimated. Approach:
+
+- Compile amateur dispersion data by club (e.g. average fade/draw tendency, sigma of axis distribution)
+- Fit a model: `spinAxis = f(club, ballSpeed, vla)` — likely a linear regression or lookup with noise
+- Higher-lofted clubs (wedges) tend toward more consistent axis; driver has highest axis variance
+- Could seed with PGA/amateur Trackman datasets or published dispersion charts
+
+This won't be measured (that requires two cameras or spin dots) but a plausible statistical distribution will make course play feel realistic rather than always hitting dead straight.
+
+## Planned: Shot Streaming Workflow for a Round
+
+For a full round, every shot needs to flow: record clip → transfer to Mac → pipeline → relay → sim.
+
+**Open question:** how to minimise friction between swings. Options under consideration:
+
+- **Folder watcher** (`tools/watch_and_send.py`): monitors a directory, auto-processes any new `.mov` dropped in
+- **USB + Image Capture**: reliable 240 fps transfer but requires cable plug-in per shot
+- **iPhone Shortcut → HTTP POST**: Shortcut grabs latest Photos video and POSTs to a small upload server on Mac over WiFi — no cable, preserves native file (no transcode)
+- **AirDrop**: fast but transcodes to 30 fps — only viable if we accept lower frame rate
+
+**Putting:** not trackable with this setup. Will putt manually in the sim (mouse/controller).
 
 ## Rules
 
