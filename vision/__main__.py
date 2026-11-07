@@ -31,6 +31,7 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
+    print(f"Clip fps     : {result['clip_fps']:.1f}")
     print(f"Impact frame : {result['impact_frame']}")
     print(f"px/mm        : {result['px_per_mm']:.4f}")
     print(f"Ball speed   : {result['ball_speed_mph']:.1f} mph")

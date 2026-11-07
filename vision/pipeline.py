@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-from .calibration import px_per_mm_from_ball
+from .calibration import px_per_mm_from_ball, calibrate_from_ball
 from .tracker import find_impact_frame, track_ball
 from .overlay import draw_overlay
 
@@ -23,37 +23,42 @@ def run(
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open clip: {clip_path}")
 
+    file_fps = cap.get(cv2.CAP_PROP_FPS)
     frames = []
+    timestamps_ms: list[float] = []
     while True:
         ok, frame = cap.read()
         if not ok:
             break
+        timestamps_ms.append(cap.get(cv2.CAP_PROP_POS_MSEC))
         frames.append(frame)
     cap.release()
 
     if not frames:
         raise ValueError("Clip contains no frames")
 
-    clip_fps = fps  # trust the caller / iPhone metadata; don't rely on cap.get
+    # Prefer fps from file metadata; fall back to caller-supplied value
+    clip_fps = file_fps if (file_fps and file_fps > 1) else fps
     impact_idx = find_impact_frame(frames)
 
-    # Auto-calibrate from the frame just before impact (ball is stationary)
+    # Auto-calibrate from frames before impact; also capture the ball's address position
+    address_pos: tuple[int, int] | None = None
     if px_per_mm is None:
         calib_frame_idx = max(0, impact_idx - 1)
-        px_per_mm = px_per_mm_from_ball(frames[calib_frame_idx])
-        if px_per_mm is None:
-            # Try a few frames before impact
-            for offset in range(2, min(10, calib_frame_idx + 1)):
-                px_per_mm = px_per_mm_from_ball(frames[calib_frame_idx - offset])
-                if px_per_mm is not None:
-                    break
+        for offset in range(0, min(15, calib_frame_idx + 1)):
+            calib = calibrate_from_ball(frames[calib_frame_idx - offset])
+            if calib is not None:
+                px_per_mm, addr_cx, addr_cy = calib
+                address_pos = (addr_cx, addr_cy)
+                break
         if px_per_mm is None:
             raise RuntimeError(
                 "Auto-calibration failed: could not detect stationary ball. "
                 "Supply --calib <px_per_mm> manually."
             )
 
-    result = track_ball(frames, impact_idx, px_per_mm, max_frames=8)
+    result = track_ball(frames, impact_idx, px_per_mm, max_frames=8,
+                        timestamps_ms=timestamps_ms, address_pos=address_pos)
     result["clip_path"] = clip_path
     result["total_frames"] = len(frames)
     result["clip_fps"] = clip_fps
