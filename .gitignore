@@ -15,3 +15,4 @@ samples/*.hevc
 
 # macOS
 .DS_Store
+.claude/
