@@ -53,8 +53,9 @@ pytest
 python tools/send_fake_shot.py                    # localhost
 python tools/send_fake_shot.py --host 192.168.x.x # remote LAN
 
-# Run relay service (not yet implemented)
-# python -m relay
+# Run relay service
+python -m relay                              # defaults: HTTP :3001, sim 127.0.0.1:3111
+python -m relay --port 3001 --sim-host 127.0.0.1 --sim-port 3111
 
 # Run vision pipeline on a clip (not yet implemented)
 # python -m vision <path/to/clip.mov> [--calib <px_per_mm>]
@@ -91,7 +92,7 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 | Project scaffold | Done |
 | `docs/sim-protocol.md` | Done (framing confirmed; ack/errors unverified) |
 | `tools/send_fake_shot.py` | Done — confirmed working, ball flies (255 yd / 235 carry / 78 ft apex at 150 mph, 12° VLA) |
-| Relay service (`relay/`) | Not started |
+| Relay service (`relay/`) | Done — HTTP :3001, forwards to sim, logs to logs/shots.jsonl |
 | Vision pipeline (`vision/`) | Not started |
 | Calibration + sample clips | Not started |
 | Horizontal direction | Not started |
