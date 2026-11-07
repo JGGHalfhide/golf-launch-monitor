@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.env
+
+# Large video/sample files — keep out of git
+samples/*.mov
+samples/*.mp4
+samples/*.avi
+samples/*.mkv
+samples/*.hevc
+
+# macOS
+.DS_Store
