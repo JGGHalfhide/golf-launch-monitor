@@ -46,6 +46,7 @@ class SimClient:
     def send_shot(self, shot: dict) -> None:
         """Send device-ready then the shot. Raises RuntimeError if not connected."""
         self._send_msg({"type": "device", "status": "ready"})
+        time.sleep(0.2)
         self._send_msg({"type": "shot", "unit": "imperial", "shot": shot})
 
     # ------------------------------------------------------------------
