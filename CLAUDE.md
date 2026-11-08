@@ -31,6 +31,7 @@ relay/      Relay service: accepts shots from any source, forwards to sim, logs 
 vision/     Offline vision pipeline: load clip → detect impact → track ball → compute speed & angle
 shotmodel/  Handicap-based spin, contact quality q, simulated HLA + spin axis (pure functions)
 config/     shot_model.toml — every shot-model tunable + the handicap baseline table
+            player_targets.toml — the player's measured per-club carry/dispersion (calibration targets)
 tools/      Dev/test scripts (send_fake_shot.py, clip_to_sim.py, watch_and_send.py, afc_source.py, ...)
 inbox/      Round-time clip inbox (gitignored); processed → inbox/done/, failures → inbox/failed/
 samples/    Local 240 fps test clips (not committed — see .gitignore)
@@ -77,6 +78,10 @@ python tools/watch_and_send.py --dry-run --club PW   # test the loop without the
 python tools/set_ball_spot.py                     # click the ball in the newest clip; Enter saves
 python tools/set_ball_spot.py --xy 830,675        # no window
 python tools/set_ball_spot.py --clear             # back to searching the whole frame
+
+# Per-club report: sim carry vs the player's known averages (config/player_targets.toml)
+python tools/calibration_report.py                # last 4 h of shots
+python tools/calibration_report.py --since 2026-11-08T16:00
 
 # Calibrate dispersion sds against the handicap table (ballistic approximation, no sim)
 python tools/calibrate_dispersion.py --club "7 iron" [--handicap 14] [-n 1000] [--carry 150]
