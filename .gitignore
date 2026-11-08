@@ -19,3 +19,6 @@ samples/*.hevc
 
 # Runtime logs and per-club speed history
 logs/
+
+# Shot streaming: clip inbox
+inbox/
