@@ -114,3 +114,75 @@ def px_per_mm_from_known_width(px_width: float, real_mm: float) -> float:
     if real_mm <= 0:
         raise ValueError("real_mm must be > 0")
     return px_width / real_mm
+
+
+def white_blob_candidates(
+    frame_bgr: np.ndarray,
+    top_fraction: float = 0.3,
+    min_area: int = 20,
+    min_circularity: float = 0.3,
+    min_radius: float = 5.0,
+    window: int = 101,
+    min_contrast: float = 30.0,
+) -> list[tuple[float, float, float, float]]:
+    """
+    Cheap ball candidates: compact, roughly round blobs that are much whiter than their
+    surroundings.
+
+    Whiteness = V − S (bright and colourless). A ball's whiteness relative to the local mean
+    (box blur over `window` px) stands out in any light: in shade the ball picks up a blue tint
+    (S ≈ 70, V ≈ 180) and fails fixed thresholds, while in sun a pale mat is itself fairly
+    "white" — so only the local contrast is reliable.
+
+    Returns (cx, cy, r, circularity) in this frame's pixel coords. Deliberately permissive —
+    background white objects come through too; the caller decides which candidate is the ball
+    by its behaviour (rests, then vanishes at impact, then flies). ~4 ms on a 960×540 frame,
+    vs ~500 ms for HoughCircles on full-res grass, which also returns hundreds of false circles.
+    """
+    h = frame_bgr.shape[0]
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    whiteness = np.clip(hsv[..., 2].astype(np.int16) - hsv[..., 1], 0, 255).astype(np.float32)
+    contrast = whiteness - cv2.blur(whiteness, (window, window))
+    mask = (contrast > min_contrast).astype(np.uint8) * 255
+    mask[: int(h * top_fraction)] = 0  # sky
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    out = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+        (x, y), r = cv2.minEnclosingCircle(cnt)
+        circ = area / (np.pi * r * r) if r > 0 else 0.0
+        if circ >= min_circularity and r >= min_radius:
+            out.append((float(x), float(y), float(r), float(circ)))
+    return out
+
+
+def refine_ball_radius(frames_bgr: list[np.ndarray], cx: float, cy: float, r_est: float) -> float | None:
+    """
+    Full-res ball radius (px) at a known resting position, averaged over several frames.
+
+    Runs HoughCircles only on a small crop around the ball with a narrow radius range, so it is
+    fast and can't latch onto background objects. r_est comes from the local-contrast blob
+    (within ~5% of the true radius on test clips), so the search range is ±25–30%.
+    """
+    radii = []
+    for frame in frames_bgr:
+        H, W = frame.shape[:2]
+        half = int(r_est * 3) + 4
+        x0, y0 = max(0, int(cx) - half), max(0, int(cy) - half)
+        x1, y1 = min(W, int(cx) + half), min(H, int(cy) + half)
+        crop = cv2.GaussianBlur(cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY), (5, 5), 1.5)
+        circles = cv2.HoughCircles(
+            crop, cv2.HOUGH_GRADIENT, dp=1, minDist=max(4, int(r_est)),
+            param1=60, param2=18,
+            minRadius=max(3, int(r_est * 0.75)), maxRadius=int(r_est * 1.3) + 1,
+        )
+        if circles is None:
+            continue
+        # The circle centred closest to the expected position
+        best = min(circles[0], key=lambda c: (c[0] + x0 - cx) ** 2 + (c[1] + y0 - cy) ** 2)
+        if np.hypot(best[0] + x0 - cx, best[1] + y0 - cy) <= r_est * 1.5:
+            radii.append(float(best[2]))
+    return float(np.median(radii)) if radii else None
