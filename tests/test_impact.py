@@ -66,6 +66,14 @@ def test_spike_that_returns_scores_zero():
     assert vanish_score(s, 400) == 0.0
 
 
+def test_clubhead_overshoot_still_counts_as_ball():
+    # IMG_0311/0324: a big dark clubhead covers the spot for a frame at impact (spike to ~100),
+    # then bare mat (~45). This was scored 0 and the shot was lost.
+    s = ball_signal(impact=400, rest=2.0, mat=45.0)
+    s[401:403] = 100.0
+    assert vanish_score(s, 400) > 30
+
+
 def test_no_change_scores_zero():
     assert vanish_score(np.full(600, 4.0), 400) == 0.0
 
@@ -124,13 +132,70 @@ def _c(n):
 
 def test_spots_vanishing_together_are_marked_down():
     # The follow-through moves feet: many spots change in the same frame; the ball vanishes alone
-    ball = (_c(150), 945, 20.0)
-    feet = [(_c(150), 1377 + d, 40.0) for d in (0, 0, 1, -1, 2)]
+    ball = (_c(150), 945, 20.0, 900)
+    feet = [(_c(150), 1377 + d, 40.0, 900) for d in (0, 0, 1, -1, 2)]
     ranked = rank_spots([ball] + feet)
     assert ranked[0][1] == 945
 
 
 def test_briefly_resting_spots_are_marked_down():
-    ball = (_c(150), 945, 20.0)
-    blip = (_c(8), 400, 60.0)   # seen in only 8 samples (0.2 s)
+    ball = (_c(150), 945, 20.0, 900)
+    blip = (_c(150), 400, 60.0, 48)   # rested only 0.2 s
     assert rank_spots([blip, ball])[0][1] == 945
+
+
+
+
+# --- hole_shape / is_ball_hole -------------------------------------------------
+
+import cv2  # noqa: E402
+
+from vision.impact import hole_shape, is_ball_hole  # noqa: E402
+
+
+def _frames_with_change(draw_before, n=30, impact=10):
+    """Small grayscale frames: mat (100) with something drawn until `impact`, gone after."""
+    frames = []
+    for i in range(n):
+        f = np.full((270, 480), 100, np.uint8)
+        if i <= impact:
+            draw_before(f)
+        frames.append(f)
+    return frames
+
+
+def test_struck_ball_leaves_round_ball_sized_hole():
+    frames = _frames_with_change(lambda f: cv2.circle(f, (200, 150), 8, 230, -1))
+    shape = hole_shape(frames, 10, 200, 150)
+    assert shape is not None and shape[0] == pytest.approx(8, abs=1.5)
+    assert is_ball_hole(shape, scale=4)          # radius 32 px at full res
+
+
+def test_irregular_change_is_not_a_ball_hole():
+    # e.g. a shoe turning: long thin change
+    frames = _frames_with_change(lambda f: cv2.rectangle(f, (170, 145), (230, 152), 30, -1))
+    assert not is_ball_hole(hole_shape(frames, 10, 200, 148), scale=4)
+
+
+def test_huge_change_is_not_a_ball_hole():
+    # IMG_0310: a shadow/body moving over the mat changes a region ~130 px in radius
+    frames = _frames_with_change(lambda f: cv2.circle(f, (200, 150), 33, 30, -1))
+    assert not is_ball_hole(hole_shape(frames, 10, 200, 150), scale=4)
+
+
+def test_no_change_no_hole():
+    frames = [np.full((270, 480), 100, np.uint8) for _ in range(30)]
+    assert hole_shape(frames, 10, 200, 150) is None
+
+
+def test_track_must_start_at_the_resting_spot():
+    # IMG_0318: junk near the top of the frame, nowhere near the ball's spot (898, 772)
+    junk = [(1513, 1289, 215), (1516, 1336, 45)]
+    assert not track_is_plausible(junk, 0.505, address=(898, 772), impact=1509)
+
+
+def test_real_tracks_start_at_the_resting_spot():
+    # IMG_0278 and IMG_0311 (low skimmer) extrapolate back to their spots
+    assert track_is_plausible([(508, 1316, 497), (509, 1724, 265)], 1.644, address=(1017, 661), impact=507)
+    assert track_is_plausible([(897, 961, 768), (898, 1325, 758), (899, 1659, 733)], 1.404,
+                              address=(786, 770), impact=896)
