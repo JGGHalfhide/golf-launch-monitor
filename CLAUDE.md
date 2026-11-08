@@ -73,6 +73,11 @@ python tools/watch_and_send.py                    # USB: iPhone camera roll over
 python tools/watch_and_send.py --source dir       # only watch inbox/ (iCloud/osxphotos export, manual drop)
 python tools/watch_and_send.py --dry-run --club PW   # test the loop without the sim
 
+# Calibrate the tee spot once per session (and whenever the tripod or tee mark moves)
+python tools/set_ball_spot.py                     # click the ball in the newest clip; Enter saves
+python tools/set_ball_spot.py --xy 830,675        # no window
+python tools/set_ball_spot.py --clear             # back to searching the whole frame
+
 # Calibrate dispersion sds against the handicap table (ballistic approximation, no sim)
 python tools/calibrate_dispersion.py --club "7 iron" [--handicap 14] [-n 1000] [--carry 150]
 ```
@@ -117,7 +122,7 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 | Contact quality score | Done — q from VLA z (two-sided) + speed z vs rolling per-club median (one-sided); history in `logs/speed_history.json` |
 | Horizontal launch angle | Simulated — correlated draw with spin axis, sd scaled by 1 + k(1−q), fat tails, personal bias |
 | Spin axis (side spin) | Simulated — see above; sds need calibrating (`tools/calibrate_dispersion.py`) |
-| Shot streaming for a round | Done — `tools/afc_source.py` (USB/AFC) + `tools/watch_and_send.py`; dry-run verified with real SW shots (clip → speech ≈ 7–9 s); live run with relay + sim next |
+| Shot streaming for a round | Built — `tools/afc_source.py` (USB/AFC) + `tools/watch_and_send.py`. First live session (2026-11-08): transfer and sim flow fine, but vision unreliable in that setup (≈ half the shots failed or misread); see setup checklist. 3W carried 174–178 yd in sim vs 214 typical — speed vs sim/spin model not yet separated |
 | Live iPhone capture | Not started |
 
 ## Planned: Spin Axis (Side Spin) Model
@@ -166,6 +171,11 @@ contact_score = 1.0 - clamp(abs(vla - expected_vla) / vla_sigma, 0, 1)
 ### Capture
 - iPhone on tripod, stock Camera app in **Slo-mo** mode at **1x** (Photo mode makes 30 fps Live Photo clips — the watcher rejects them with a spoken "not slow motion").
 - Nothing white directly behind the ball or along its first ~1 m of flight from the camera's view (a white slide there made the ball undetectable).
+- **Setup checklist (from the 2026-11-08 live session, 7/16 failures + wrong readings):**
+  - Camera far enough back that the ball is ~35–40 px across (ball must stay in frame ≥ 5 frames at 3W speed; at ~70 px it left in 2–3, so one bad detection ruined the reading).
+  - Dark plain backdrop (black tarp/sheet) behind the first 1–2 m of flight; toys, slides, people and pets out of frame.
+  - Mark a fixed tee spot; keep the tripod fixed; run `tools/set_ball_spot.py` at the start of each session.
+  - Even light on the mat if possible (dappled tree shade made the ball hard to separate from bright mat).
 - **Apple Watch Camera Remote** starts/stops recording (confirmed working in Slo-mo — `samples/IMG_0278.mov` was shot this way).
 - Two taps per shot: start just before the swing, stop right after. Keep clips short (pipeline loads every frame).
 
