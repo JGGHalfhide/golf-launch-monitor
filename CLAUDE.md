@@ -32,7 +32,8 @@ vision/     Offline vision pipeline: load clip → detect impact → track ball 
 shotmodel/  Handicap-based spin, contact quality q, simulated HLA + spin axis (pure functions)
 config/     shot_model.toml — every shot-model tunable + the handicap baseline table
             player_targets.toml — the player's measured per-club carry/dispersion (calibration targets)
-tools/      Dev/test scripts (send_fake_shot.py, clip_to_sim.py, watch_and_send.py, afc_source.py, ...)
+tools/      Scripts: watch_and_send.py (round loop), afc_source.py (USB transfer), clip_to_sim.py,
+            set_ball_spot.py, calibration_report.py, send_fake_shot.py, calibrate_dispersion.py
 inbox/      Round-time clip inbox (gitignored); processed → inbox/done/, failures → inbox/failed/
 samples/    Local 240 fps test clips (not committed — see .gitignore)
 docs/       Protocol and calibration notes
@@ -112,7 +113,19 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 
 ## Current Phase
 
-**Phase 2 — End-to-end pipeline working. Shot data flows from real iPhone clip → sim.**
+**Phase 3 — Calibration. The full loop works (iPhone → USB → vision → shot model → relay → OpenGolfSim → spoken result); readings must now be made reliable and calibrated to the player's known averages.**
+
+### Start here next session
+1. **PR #2 (`vision-hole-scale`) is open, not merged** — vision fixes from the first live session, ball-spot calibration, player targets, calibration report. Merge it (or check it out) before working.
+2. **Bag run** when the user says so: start `python -m relay` and `python tools/watch_and_send.py` (live, no `--dry-run`); OpenGolfSim range open; user selects each club in the sim and hits 5–8 shots per club; optional `tools/set_ball_spot.py` once at the start.
+3. Afterwards: review every clip (frames around impact, are the detections really the ball?), `--exclude` confirmed misreads, then `python tools/calibration_report.py`.
+4. Tune toward `config/player_targets.toml`: similar carry Δ% across clubs → speed-measurement scale; uneven → per-club spin/launch in `config/shot_model.toml`. Target ≈ ±5% average carry per club. "Good enough", not perfect.
+
+**Constraints (from the user):** outdoor setup is mat + net only — never propose backdrops, curtains or other equipment. Free changes (tripod position/angle, framing) are fine to suggest. Per-session steps must stay minimal.
+
+**Known state of accuracy (2026-11-08, 16-clip live session, re-run on current code):** ~half of clips read believably; the rest fail safely ("ball not tracked") or misread. Main causes: ball leaves the frame in 2–3 frames at 3W/7i speed (camera close, ball ~70 px), cluttered background (white slides, toys, people, dog), dappled sun. One confirmed misread is excluded (14.1 mph on a full, clean 7i). Sim carry vs targets so far: 7i −30%, 3W −21%, SW −7% (few shots) — speed measurement vs sim/spin model not yet separated.
+
+**Simulator options:** staying on OpenGolfSim (free; small course library). Awesome Golf has no third-party/API input — only its partner launch monitors. GSPro has an open "Open Connect" API (JSON over TCP) and thousands of community courses; adding it as a second relay output would be a modest change if the user wants more courses.
 
 | Item | Status |
 |---|---|
@@ -120,17 +133,18 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 | `docs/sim-protocol.md` | Done — protocol fully confirmed incl. 200ms delay between device-ready and shot |
 | `tools/send_fake_shot.py` | Done — confirmed working (255 yd / 235 carry / 78 ft apex at 150 mph, 12° VLA) |
 | Relay service (`relay/`) | Done — HTTP :3001 → TCP :3111, logs shots.jsonl, tracks current club from sim player events |
-| Vision pipeline (`vision/`) | Done — single streaming pass (bounded memory); impact = ball leaves its resting spot (`vision/impact.py`); tracker picks white + round changed blobs, prediction-gated |
-| Auto-calibration | Done — px/mm from ball radius refined at full res over pre-impact frames |
+| Vision pipeline (`vision/`) | Working, not yet reliable — single streaming pass (bounded memory); ball = resting spot that leaves a round, ball-sized hole at impact (`vision/impact.py`); tracker picks white + round changed blobs, prediction-gated, must extrapolate back to the spot; tracks > 220 mph rejected |
+| Auto-calibration | Done — px/mm from the hole the ball leaves (frame before vs 8 after impact); address/flight size are fallbacks. Optional per-session ball spot (`tools/set_ball_spot.py`) |
+| Calibration tooling | Done — `config/player_targets.toml` (player's per-club averages), `tools/calibration_report.py` (sim carry vs targets, failures, `--exclude` misreads) |
 | `tools/clip_to_sim.py` | Done — full end-to-end: clip → vision → relay → sim; confirmed working (76 mph / 30° VLA / 101 yd) |
 | Spin estimation | Done — `shotmodel`: handicap-interpolated mid spin × (1 + per-club %/deg × VLA deviation) |
 | Contact quality score | Done — q from VLA z (two-sided) + speed z vs rolling per-club median (one-sided); history in `logs/speed_history.json` |
 | Horizontal launch angle | Simulated — correlated draw with spin axis, sd scaled by 1 + k(1−q), fat tails, personal bias |
 | Spin axis (side spin) | Simulated — see above; sds need calibrating (`tools/calibrate_dispersion.py`) |
-| Shot streaming for a round | Built — `tools/afc_source.py` (USB/AFC) + `tools/watch_and_send.py`. First live session (2026-11-08): transfer and sim flow fine, but vision unreliable in that setup (≈ half the shots failed or misread); see setup checklist. 3W carried 174–178 yd in sim vs 214 typical — speed vs sim/spin model not yet separated |
+| Shot streaming for a round | Done — `tools/afc_source.py` (USB/AFC) + `tools/watch_and_send.py`; transfer, relay, sim and speech confirmed live 2026-11-08. Accuracy limited by vision (see above) |
 | Live iPhone capture | Not started |
 
-## Planned: Spin Axis (Side Spin) Model
+## Background: Spin Axis (Side Spin) Model — implemented in `shotmodel/` (original plan kept for context)
 
 The sim's `spinAxis` field controls draw/fade/straight. Currently hardcoded to 0 (straight).
 
@@ -143,7 +157,7 @@ The sim's `spinAxis` field controls draw/fade/straight. Currently hardcoded to 0
 
 This won't be measured (that requires two cameras or spin dots) but a plausible statistical distribution will make course play feel realistic rather than always hitting dead straight.
 
-## Planned: Contact Quality Score → Dispersion Scaling
+## Background: Contact Quality Score → Dispersion Scaling — implemented in `shotmodel/` (original plan kept for context)
 
 **Idea:** derive a contact quality score from the measured VLA and ball speed vs. what's expected for the club. A mis-hit shows up as an inconsistency between these two — not just an unusual value in isolation, but the *combination* being off.
 
@@ -169,18 +183,17 @@ contact_score = 1.0 - clamp(abs(vla - expected_vla) / vla_sigma, 0, 1)
 
 **Data needed:** per-club VLA standard deviation for amateurs (Trackman or similar). Research before building.
 
-## Planned: Shot Streaming Workflow for a Round
+## Shot Streaming Workflow for a Round (built)
 
 **Decided 2026-11-07.** Every shot flows: Watch remote start/stop → clip lands on Mac → pipeline → relay → sim → spoken result.
 
 ### Capture
 - iPhone on tripod, stock Camera app in **Slo-mo** mode at **1x** (Photo mode makes 30 fps Live Photo clips — the watcher rejects them with a spoken "not slow motion").
 - Nothing white directly behind the ball or along its first ~1 m of flight from the camera's view (a white slide there made the ball undetectable).
-- **Setup checklist (from the 2026-11-08 live session, 7/16 failures + wrong readings):**
-  - Camera far enough back that the ball is ~35–40 px across (ball must stay in frame ≥ 5 frames at 3W speed; at ~70 px it left in 2–3, so one bad detection ruined the reading).
-  - Dark plain backdrop (black tarp/sheet) behind the first 1–2 m of flight; toys, slides, people and pets out of frame.
-  - Mark a fixed tee spot; keep the tripod fixed; run `tools/set_ball_spot.py` at the start of each session.
-  - Even light on the mat if possible (dappled tree shade made the ball hard to separate from bright mat).
+- **Setup tips (free changes only — no added equipment, per the user):**
+  - Tripod back far enough that the ball is ~35–40 px across, so it stays in frame ≥ 5 frames at 3W speed (at ~70 px it left in 2–3 and one bad detection ruined the reading).
+  - Angle/place the tripod so white objects (slides, toys) aren't directly behind the ball's first ~1 m of flight.
+  - Keep the tripod fixed during a session; optionally run `tools/set_ball_spot.py` once at the start.
 - **Apple Watch Camera Remote** starts/stops recording (confirmed working in Slo-mo — `samples/IMG_0278.mov` was shot this way).
 - Two taps per shot: start just before the swing, stop right after. Keep clips short (pipeline loads every frame).
 
