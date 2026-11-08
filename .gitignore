@@ -16,3 +16,6 @@ samples/*.hevc
 # macOS
 .DS_Store
 .claude/
+
+# Runtime logs and per-club speed history
+logs/
