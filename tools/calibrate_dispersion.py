@@ -8,7 +8,7 @@ compares the 95% lateral width to the table's dispersion range.
 
     lateral_yd = carry * sin(hla) + curve_factor * carry * sin(axis)
 
-The sim is NOT used: each shot there takes several seconds of ball flight and
+curve_factor is per club in the config (measured in the sim). The sim is NOT used: each shot there takes several seconds of ball flight and
 would land in your play session, so 1000+ shots isn't practical.
 
 Usage:
@@ -45,14 +45,14 @@ def realistic_q(n: int, cfg: dict, rng: np.random.Generator) -> np.ndarray:
 
 
 def simulate(q: np.ndarray, sd_hla: float, sd_axis: float, cfg: dict, carry: float,
-             rng: np.random.Generator) -> np.ndarray:
+             curve_factor: float, rng: np.random.Generator) -> np.ndarray:
     d, hand = cfg["dispersion"], handedness_sign(cfg["player"]["handedness"])
     bh, ba = hand * cfg["bias"]["hla_deg"], hand * cfg["bias"]["axis_deg"]
     draws = np.array([
         generate_lateral(qi, sd_hla, sd_axis, bh, ba, d["k"], d["rho"], d["tail_prob"], d["tail_mult"], rng)[:2]
         for qi in q
     ])
-    return lateral_yd(draws[:, 0], draws[:, 1] * d.get("axis_sign", 1), carry, cfg["calibration"]["curve_factor"])
+    return lateral_yd(draws[:, 0], draws[:, 1] * d.get("axis_sign", 1), carry, curve_factor)
 
 
 def main() -> int:
@@ -72,6 +72,7 @@ def main() -> int:
         return 1
     hcp = cfg["player"]["handicap"] if args.handicap is None else args.handicap
     carry = args.carry or cfg["clubs"][club]["carry_yd"]
+    cf = cfg["clubs"][club].get("curve_factor", cfg["calibration"]["curve_factor"])
     b = club_baseline(club, hcp, cfg)
     disp_mid, disp_half = range_at_handicap(cfg["clubs"][club]["dispersion"], hcp, cfg["anchors"]["handicaps"])
     rng = np.random.default_rng(args.seed)
@@ -83,20 +84,20 @@ def main() -> int:
         f"q = {cfg['calibration']['q_low']} (poor)": np.full(args.n, cfg["calibration"]["q_low"]),
     }
 
-    print(f"Club {club} | handicap {hcp:g} | carry {carry:g} yd | n={args.n}")
+    print(f"Club {club} | handicap {hcp:g} | carry {carry:g} yd | curve_factor {cf:g} | n={args.n}")
     print(f"Effective sd_hla {b.sd_hla:.2f}°  sd_axis {b.sd_axis:.2f}°")
     print(f"Table 95% width: {disp_mid - disp_half:.1f} – {disp_mid + disp_half:.1f} yd (mid {disp_mid:.1f})")
     print(f"Realistic q: mean {q_real.mean():.2f}, p10 {np.percentile(q_real, 10):.2f}, p90 {np.percentile(q_real, 90):.2f}\n")
     print(f"{'scenario':<20}{'95% width':>11}{'mean lat':>10}  vs table")
     for name, q in scenarios.items():
-        lat = simulate(q, b.sd_hla, b.sd_axis, cfg, carry, np.random.default_rng(args.seed))
+        lat = simulate(q, b.sd_hla, b.sd_axis, cfg, carry, cf, np.random.default_rng(args.seed))
         w = width95(lat)
         print(f"{name:<20}{w:>9.1f}yd{lat.mean():>+8.1f}yd  {w / disp_mid:5.2f}x mid")
 
     # Suggest sds: width is ~linear in sd, iterate a few times to absorb sin() nonlinearity.
     factor = 1.0
     for _ in range(4):
-        lat = simulate(q_real, b.sd_hla * factor, b.sd_axis * factor, cfg, carry, np.random.default_rng(args.seed))
+        lat = simulate(q_real, b.sd_hla * factor, b.sd_axis * factor, cfg, carry, cf, np.random.default_rng(args.seed))
         factor *= disp_mid / width95(lat)
 
     ref_hla, ref_axis = base_sd(club, cfg)

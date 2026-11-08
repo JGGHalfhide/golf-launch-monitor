@@ -172,3 +172,18 @@ Shot: 150 mph, 12° VLA, 0° HLA, 2800 rpm, 0° axis
 | Apex | 23.76 m | 78 ft |
 | Roll | 17.91 m | 20 yd |
 | Lateral | 0.0 m | straight |
+
+## Spin Axis Sign and Curve (2026-11-07)
+
+Test shots at the hcp-18 mid VLA/spin per club, HLA 0. Straight (axis 0) shots landed at lateral 0.0 exactly.
+**Positive `spinAxis` curves the ball right** (same sign as positive `lateral` / positive HLA).
+
+| Club | Speed (mph) | VLA | Spin | Carry (yd) | Lateral at axis +15° (yd) | curve_factor = lat / (carry · sin 15°) |
+|---|---|---|---|---|---|---|
+| Driver | 140 | 14.1 | 3200 | 214.6 | 35.4 | 0.637 |
+| 7 Iron | 105 | 20.3 | 5080 | 133.4 | 13.1 | 0.380 |
+| PW | 76.3 | 29.5 | 6840 | 88.6 | 6.7 | 0.292 |
+| GW | 72 | 32.5 | 7380 | 82.1 | 6.3 | 0.294 |
+| SW | 65 | 36.0 | 7720 | 70.5 | 4.9 | 0.270 |
+
+These feed `curve_factor` in `config/shot_model.toml` (used by `tools/calibrate_dispersion.py`).
