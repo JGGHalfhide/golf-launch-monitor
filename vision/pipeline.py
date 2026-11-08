@@ -17,6 +17,7 @@ WINDOW_PRE = 15     # full-res frames kept before impact (radius refinement, tra
 WINDOW_POST = 15    # ... and after (tracker uses up to 8)
 HOLE_AFTER = 8      # frames after impact for measuring the hole the ball left (club gone by then)
 MAX_SPOTS = 4       # resting spots to try tracking from, best first
+SPOT_TOLERANCE = 3  # with a calibrated ball spot: max distance (in ball radii) of the resting ball
 
 
 def run(
@@ -24,9 +25,14 @@ def run(
     px_per_mm: float | None = None,
     output_path: str | None = None,
     fps: float = 240.0,
+    ball_spot: tuple[float, float, float] | None = None,
 ) -> dict:
     """
     Full pipeline. Returns the same dict as track_ball plus clip metadata.
+
+    ball_spot: (x, y, r) of the calibrated tee spot in full-res pixels (tools/set_ball_spot.py).
+    When given, only resting spots within SPOT_TOLERANCE ball radii of it are considered —
+    no searching the whole frame, which is where most misidentifications came from.
 
     Pass 1 streams the clip once, keeping only small grayscale frames, timestamps and
     white-blob ball candidates from sampled frames (bounded memory: ~250 MB for an 8 s clip).
@@ -72,6 +78,11 @@ def run(
         impact = impact_from_signal(sig)
         if impact is not None and (score := vanish_score(sig, impact)) > 0:
             spots.append((c, impact, score, rest_frames(sig, impact)))
+    if ball_spot is not None:
+        sx, sy, sr = ball_spot
+        spots = [sp for sp in spots if np.hypot(sp[0].cx - sx, sp[0].cy - sy) <= SPOT_TOLERANCE * sr]
+        if not spots:
+            raise RuntimeError("No shot detected at the calibrated ball spot — ball moved off the tee mark?")
     if not spots:
         raise RuntimeError("No shot detected — no resting ball that later left its spot")
     ranked = rank_spots(spots)
