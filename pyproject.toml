@@ -10,6 +10,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 spin = ["opengolfcoach"]
+stream = ["pymobiledevice3>=11.50"]  # USB clip transfer from iPhone (tools/watch_and_send.py)
 
 [build-system]
 requires = ["setuptools>=68"]

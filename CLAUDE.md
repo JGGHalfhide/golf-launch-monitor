@@ -31,7 +31,8 @@ relay/      Relay service: accepts shots from any source, forwards to sim, logs 
 vision/     Offline vision pipeline: load clip → detect impact → track ball → compute speed & angle
 shotmodel/  Handicap-based spin, contact quality q, simulated HLA + spin axis (pure functions)
 config/     shot_model.toml — every shot-model tunable + the handicap baseline table
-tools/      Dev/test scripts (send_fake_shot.py, etc.)
+tools/      Dev/test scripts (send_fake_shot.py, clip_to_sim.py, watch_and_send.py, afc_source.py, ...)
+inbox/      Round-time clip inbox (gitignored); processed → inbox/done/, failures → inbox/failed/
 samples/    Local 240 fps test clips (not committed — see .gitignore)
 docs/       Protocol and calibration notes
 tests/      pytest suite — all math functions must have tests
@@ -42,7 +43,7 @@ tests/      pytest suite — all math functions must have tests
 ```bash
 # Setup — must use Python 3.13 (opencv doesn't support 3.14 yet)
 /opt/homebrew/opt/python@3.13/bin/python3.13 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,stream]"   # stream = pymobiledevice3, for USB clip transfer
 
 # Run tests
 pytest
@@ -66,6 +67,11 @@ python tools/clip_to_sim.py samples/<clip.mov>                   # auto-detects 
 python tools/clip_to_sim.py samples/<clip.mov> --club "7 Iron"   # override club
 python tools/clip_to_sim.py samples/<clip.mov> --dry-run         # print shot, don't send
 python tools/clip_to_sim.py samples/<clip.mov> --handicap 10 --seed 1  # override hcp, reproducible draw
+
+# Continuous shot pipeline for a round (relay + sim running, iPhone USB-tethered & unlocked)
+python tools/watch_and_send.py                    # USB: iPhone camera roll over AFC (pymobiledevice3)
+python tools/watch_and_send.py --source dir       # only watch inbox/ (iCloud/osxphotos export, manual drop)
+python tools/watch_and_send.py --dry-run --club PW   # test the loop without the sim
 
 # Calibrate dispersion sds against the handicap table (ballistic approximation, no sim)
 python tools/calibrate_dispersion.py --club "7 iron" [--handicap 14] [-n 1000] [--carry 150]
@@ -104,14 +110,14 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 | `docs/sim-protocol.md` | Done — protocol fully confirmed incl. 200ms delay between device-ready and shot |
 | `tools/send_fake_shot.py` | Done — confirmed working (255 yd / 235 carry / 78 ft apex at 150 mph, 12° VLA) |
 | Relay service (`relay/`) | Done — HTTP :3001 → TCP :3111, logs shots.jsonl, tracks current club from sim player events |
-| Vision pipeline (`vision/`) | Done — background subtraction, directional constraints, linear regression over real timestamps |
-| Auto-calibration | Done — px/mm from ball diameter in pre-impact frame |
+| Vision pipeline (`vision/`) | Done — single streaming pass (bounded memory); impact = ball leaves its resting spot (`vision/impact.py`); tracker picks white + round changed blobs, prediction-gated |
+| Auto-calibration | Done — px/mm from ball radius refined at full res over pre-impact frames |
 | `tools/clip_to_sim.py` | Done — full end-to-end: clip → vision → relay → sim; confirmed working (76 mph / 30° VLA / 101 yd) |
 | Spin estimation | Done — `shotmodel`: handicap-interpolated mid spin × (1 + per-club %/deg × VLA deviation) |
 | Contact quality score | Done — q from VLA z (two-sided) + speed z vs rolling per-club median (one-sided); history in `logs/speed_history.json` |
 | Horizontal launch angle | Simulated — correlated draw with spin axis, sd scaled by 1 + k(1−q), fat tails, personal bias |
 | Spin axis (side spin) | Simulated — see above; sds need calibrating (`tools/calibrate_dispersion.py`) |
-| Shot streaming for a round | **Next** — decided: Apple Watch remote + USB-tethered ImageCaptureCore watcher (see below); not built yet |
+| Shot streaming for a round | Done — `tools/afc_source.py` (USB/AFC) + `tools/watch_and_send.py`; dry-run verified with real SW shots (clip → speech ≈ 7–9 s); live run with relay + sim next |
 | Live iPhone capture | Not started |
 
 ## Planned: Spin Axis (Side Spin) Model
@@ -158,28 +164,30 @@ contact_score = 1.0 - clamp(abs(vla - expected_vla) / vla_sigma, 0, 1)
 **Decided 2026-11-07.** Every shot flows: Watch remote start/stop → clip lands on Mac → pipeline → relay → sim → spoken result.
 
 ### Capture
-- iPhone on tripod, stock Camera app in **Slo-mo** mode.
+- iPhone on tripod, stock Camera app in **Slo-mo** mode at **1x** (Photo mode makes 30 fps Live Photo clips — the watcher rejects them with a spoken "not slow motion").
+- Nothing white directly behind the ball or along its first ~1 m of flight from the camera's view (a white slide there made the ball undetectable).
 - **Apple Watch Camera Remote** starts/stops recording (confirmed working in Slo-mo — `samples/IMG_0278.mov` was shot this way).
 - Two taps per shot: start just before the swing, stop right after. Keep clips short (pipeline loads every frame).
 
 ### Transfer: cable (primary)
 - iPhone stays **USB-tethered to the Mac** (also charges it through a round).
-- A watcher uses macOS **ImageCaptureCore** (`ICCameraDevice` delegate `didAddItems`) to detect each new clip on the connected phone and download the **original** file within seconds. No iCloud, no AirDrop transcode.
-- Swift CLI or PyObjC — TBD. Phone must be trusted and unlocked (Camera app open keeps it awake).
+- `tools/afc_source.py` polls the phone's `DCIM/` folders over **AFC** (Apple File Conduit, via `pymobiledevice3`) and downloads each new original `IMG_####.MOV` once its size settles. No iCloud, no AirDrop transcode. Phone must be trusted.
+- **ImageCaptureCore/PTP was tried and rejected (2026-11-08):** with Optimize iPhone Storage on, the phone exposes only a small stale subset (20 items) over PTP — new clips never appeared, even after replugging; Image Capture.app showed the same. AFC sees them immediately.
+- iPhone **Settings → Apps → Photos → Transfer to Mac or PC → Keep Originals**, otherwise iOS may transcode on transfer. The watcher rejects clips under `--min-fps` (default 200, measured from per-frame timestamps).
 
 ### Transfer: iCloud (fallback)
 - iCloud Photos sync + `osxphotos` exporting new slo-mo originals. Needs Photos running with "Download Originals to this Mac". Lag 10–60+ s, so practice only.
 
-### Mac side: `tools/watch_and_send.py` (to build)
+### Mac side: `tools/watch_and_send.py` (built)
 - Source-agnostic: takes clips from whichever transfer route is active, so the rest of the flow is shared.
 - Process each clip **exactly once** (persist handled IDs); ignore anything recorded before the watcher started.
 - Run vision → shotmodel → relay; club comes from the relay's tracked sim club (no input mid-round).
 - **Speak every result** (macOS `say`, e.g. "PW, 96 mph, 28 degrees") and **announce failures** loudly so you re-hit or play it manually.
 
 ### Steps
-1. Throwaway test: time from Watch "stop" to clip downloaded via ImageCaptureCore, plus whether you get the original 240 fps file. Check per-frame `CAP_PROP_POS_MSEC` intervals, not `CAP_PROP_FPS` (that's an average over variable-frame-rate files).
+1. ~~Throwaway test: Watch "stop" → clip downloaded, original 240 fps?~~ Done via AFC: 1.8 s for 72 MB, 240.0 fps measured (`CAP_PROP_FPS` reported 177 — it's a VFR average, never trust it).
 2. Throwaway test: iCloud/osxphotos lag and frame rate (fallback only).
-3. Build `tools/watch_and_send.py` on the winning source.
+3. ~~Build `tools/watch_and_send.py` on the winning source.~~ Done (AFC).
 
 ### Rejected / deferred
 - **AirDrop**: transcodes to 30 fps.
