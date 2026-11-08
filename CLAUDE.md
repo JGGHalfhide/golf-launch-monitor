@@ -29,6 +29,8 @@ A DIY golf launch monitor that processes iPhone 240 fps slow-motion clips on a M
 ```
 relay/      Relay service: accepts shots from any source, forwards to sim, logs shots + results
 vision/     Offline vision pipeline: load clip → detect impact → track ball → compute speed & angle
+shotmodel/  Handicap-based spin, contact quality q, simulated HLA + spin axis (pure functions)
+config/     shot_model.toml — every shot-model tunable + the handicap baseline table
 tools/      Dev/test scripts (send_fake_shot.py, etc.)
 samples/    Local 240 fps test clips (not committed — see .gitignore)
 docs/       Protocol and calibration notes
@@ -63,6 +65,10 @@ python -m vision <path/to/clip.mov> --fps 240             # explicit frame rate
 python tools/clip_to_sim.py samples/<clip.mov>                   # auto-detects club from relay
 python tools/clip_to_sim.py samples/<clip.mov> --club "7 Iron"   # override club
 python tools/clip_to_sim.py samples/<clip.mov> --dry-run         # print shot, don't send
+python tools/clip_to_sim.py samples/<clip.mov> --handicap 10 --seed 1  # override hcp, reproducible draw
+
+# Calibrate dispersion sds against the handicap table (ballistic approximation, no sim)
+python tools/calibrate_dispersion.py --club "7 iron" [--handicap 14] [-n 1000] [--carry 150]
 ```
 
 ## Sim Protocol Summary
@@ -84,7 +90,8 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 - Angles: **degrees**
 - Positive horizontal angle = **right of target**
 - Camera frame rate: **240 fps** → 1 frame = 4.167 ms
-- Spin: estimated from club + launch angle (not measured)
+- Spin: estimated from club + handicap baseline + VLA deviation (not measured)
+- HLA and spin axis: **simulated** from contact quality + personal bias (not measured); positive spinAxis assumed = curves right (`axis_sign` in config flips it)
 - Result distances from sim: **meters**
 
 ## Current Phase
@@ -100,9 +107,10 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 | Vision pipeline (`vision/`) | Done — background subtraction, directional constraints, linear regression over real timestamps |
 | Auto-calibration | Done — px/mm from ball diameter in pre-impact frame |
 | `tools/clip_to_sim.py` | Done — full end-to-end: clip → vision → relay → sim; confirmed working (76 mph / 30° VLA / 101 yd) |
-| Spin estimation | Done — club-aware model: per-club base spin + VLA deviation adjustment (200 rpm/deg) |
-| Horizontal launch angle | Not started — always 0; needs side-spin / direction tracking |
-| Spin axis (side spin) | **Planned** — statistical model correlating club, ball speed, and VLA (see below) |
+| Spin estimation | Done — `shotmodel`: handicap-interpolated mid spin × (1 + per-club %/deg × VLA deviation) |
+| Contact quality score | Done — q from VLA z (two-sided) + speed z vs rolling per-club median (one-sided); history in `logs/speed_history.json` |
+| Horizontal launch angle | Simulated — correlated draw with spin axis, sd scaled by 1 + k(1−q), fat tails, personal bias |
+| Spin axis (side spin) | Simulated — see above; sds need calibrating (`tools/calibrate_dispersion.py`) |
 | Shot streaming for a round | **Planned** — workflow TBD; need to solve clip transfer (USB vs WiFi) and folder-watcher automation |
 | Live iPhone capture | Not started |
 
