@@ -111,7 +111,7 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 | Contact quality score | Done — q from VLA z (two-sided) + speed z vs rolling per-club median (one-sided); history in `logs/speed_history.json` |
 | Horizontal launch angle | Simulated — correlated draw with spin axis, sd scaled by 1 + k(1−q), fat tails, personal bias |
 | Spin axis (side spin) | Simulated — see above; sds need calibrating (`tools/calibrate_dispersion.py`) |
-| Shot streaming for a round | **Planned** — workflow TBD; need to solve clip transfer (USB vs WiFi) and folder-watcher automation |
+| Shot streaming for a round | **Next** — decided: Apple Watch remote + USB-tethered ImageCaptureCore watcher (see below); not built yet |
 | Live iPhone capture | Not started |
 
 ## Planned: Spin Axis (Side Spin) Model
@@ -155,14 +155,36 @@ contact_score = 1.0 - clamp(abs(vla - expected_vla) / vla_sigma, 0, 1)
 
 ## Planned: Shot Streaming Workflow for a Round
 
-For a full round, every shot needs to flow: record clip → transfer to Mac → pipeline → relay → sim.
+**Decided 2026-11-07.** Every shot flows: Watch remote start/stop → clip lands on Mac → pipeline → relay → sim → spoken result.
 
-**Open question:** how to minimise friction between swings. Options under consideration:
+### Capture
+- iPhone on tripod, stock Camera app in **Slo-mo** mode.
+- **Apple Watch Camera Remote** starts/stops recording (confirmed working in Slo-mo — `samples/IMG_0278.mov` was shot this way).
+- Two taps per shot: start just before the swing, stop right after. Keep clips short (pipeline loads every frame).
 
-- **Folder watcher** (`tools/watch_and_send.py`): monitors a directory, auto-processes any new `.mov` dropped in
-- **USB + Image Capture**: reliable 240 fps transfer but requires cable plug-in per shot
-- **iPhone Shortcut → HTTP POST**: Shortcut grabs latest Photos video and POSTs to a small upload server on Mac over WiFi — no cable, preserves native file (no transcode)
-- **AirDrop**: fast but transcodes to 30 fps — only viable if we accept lower frame rate
+### Transfer: cable (primary)
+- iPhone stays **USB-tethered to the Mac** (also charges it through a round).
+- A watcher uses macOS **ImageCaptureCore** (`ICCameraDevice` delegate `didAddItems`) to detect each new clip on the connected phone and download the **original** file within seconds. No iCloud, no AirDrop transcode.
+- Swift CLI or PyObjC — TBD. Phone must be trusted and unlocked (Camera app open keeps it awake).
+
+### Transfer: iCloud (fallback)
+- iCloud Photos sync + `osxphotos` exporting new slo-mo originals. Needs Photos running with "Download Originals to this Mac". Lag 10–60+ s, so practice only.
+
+### Mac side: `tools/watch_and_send.py` (to build)
+- Source-agnostic: takes clips from whichever transfer route is active, so the rest of the flow is shared.
+- Process each clip **exactly once** (persist handled IDs); ignore anything recorded before the watcher started.
+- Run vision → shotmodel → relay; club comes from the relay's tracked sim club (no input mid-round).
+- **Speak every result** (macOS `say`, e.g. "PW, 96 mph, 28 degrees") and **announce failures** loudly so you re-hit or play it manually.
+
+### Steps
+1. Throwaway test: time from Watch "stop" to clip downloaded via ImageCaptureCore, plus whether you get the original 240 fps file. Check per-frame `CAP_PROP_POS_MSEC` intervals, not `CAP_PROP_FPS` (that's an average over variable-frame-rate files).
+2. Throwaway test: iCloud/osxphotos lag and frame rate (fallback only).
+3. Build `tools/watch_and_send.py` on the winning source.
+
+### Rejected / deferred
+- **AirDrop**: transcodes to 30 fps.
+- **iPhone Shortcut → HTTP POST**: Shortcuts can't reliably drive slo-mo; extra friction per shot.
+- **Sideloaded Swift capture app** (rolling buffer + audio-spike trigger, fully hands-free): deferred. Free Apple ID needs a reinstall every 7 days. Revisit only if two Watch taps per shot proves annoying.
 
 **Putting:** not trackable with this setup. Will putt manually in the sim (mouse/controller).
 
