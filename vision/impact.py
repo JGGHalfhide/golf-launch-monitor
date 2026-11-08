@@ -8,6 +8,7 @@ Watch, the follow-through) doesn't matter — only whether the ball is still the
 
 from dataclasses import dataclass
 
+import cv2
 import numpy as np
 
 
@@ -132,31 +133,44 @@ def impact_from_signal(
     return last_end
 
 
-def vanish_score(signal: np.ndarray, impact: int, pre: int = 12, post: int = 12) -> float:
+def vanish_score(signal: np.ndarray, impact: int, pre: int = 12, post: int = 12, margin: float = 15.0) -> float:
     """
     How much a spot's disappearance looks like a struck ball (higher = more ball-like; 0 = not).
 
-    A struck ball leaves its spot within a single 240 fps frame and leaves steady bare mat
-    behind. Feet, shadows and body parts change over several frames or keep flickering.
-      jump  = median level after (skipping 2 frames) − median level before
-      sharp = largest single-frame step around impact / jump   (ball ≈ 0.85–0.95)
-      wobble = std after / jump                                  (ball ≈ 0.01–0.03)
-    Score = jump × min(sharp, 1) × (1 − wobble); a spike that comes straight back
-    (sharp ≫ 1, tiny jump) scores 0.
+    A struck ball leaves its spot within a frame or two and leaves steady bare mat behind.
+    Feet, shadows and body parts change over several frames or keep flickering.
+      jump   = median level after (skipping 2 frames) − median level before   (must be ≥ margin)
+      sharp  = share of the jump reached within 2 frames of impact, capped at 1
+               (a big clubhead covering the spot for a frame overshoots — that still counts as
+               sharp; IMG_0311/0324 were lost when overshoot was treated as "not a ball")
+      wobble = std after / jump                                               (ball ≈ 0.01–0.05)
+    Score = jump × sharp × (1 − wobble). A spot that only flickers and comes back has a
+    jump below margin and scores 0.
     """
     s = np.asarray(signal, dtype=float)
     before = s[max(0, impact - pre): impact + 1]
     after = s[impact + 3: impact + 3 + post]
     if len(after) < post // 2 or len(before) == 0:
         return 0.0
-    jump = float(np.median(after) - np.median(before))
-    if jump <= 0:
+    base = float(np.median(before))
+    jump = float(np.median(after)) - base
+    if jump < margin:
         return 0.0
-    sharp = float(np.diff(s[max(0, impact - 2): impact + 4]).max()) / jump
+    sharp = min(1.0, (float(s[impact + 1: impact + 3].max()) - base) / jump)
     wobble = float(np.std(after)) / jump
-    if sharp > 1.5:
-        return 0.0
-    return jump * min(sharp, 1.0) * max(0.0, 1.0 - wobble)
+    return jump * max(0.0, sharp) * max(0.0, 1.0 - wobble)
+
+
+def rest_frames(signal: np.ndarray, impact: int, margin: float = 15.0) -> int:
+    """Length of the unbroken resting run ending at impact (frames), from the patch signal."""
+    s = np.asarray(signal, dtype=float)
+    present = s < float(np.percentile(s, 10)) + margin
+    n = 0
+    for i in range(impact, -1, -1):
+        if not present[i]:
+            break
+        n += 1
+    return n
 
 
 MAX_BALL_SPEED_MPH = 220.0  # comfortably above any real shot (tour driver ≈ 190 mph)
@@ -167,13 +181,19 @@ def track_is_plausible(
     px_per_mm: float,
     min_steps: int = 1,
     fps: float = 240.0,
+    address: tuple[float, float] | None = None,
+    impact: int | None = None,
 ) -> bool:
     """
-    A real launch moves the ball a large but bounded distance every frame.
+    A real launch moves the ball a large but bounded distance every frame, starting from
+    where the ball was resting.
 
     Lower bound: even a 20 mph chip moves ~37 mm ≈ 0.9 ball diameters per 240 fps frame, so a
     median step under half a diameter is a static blob (shoe logo, junk). Upper bound: no step
     may exceed MAX_BALL_SPEED_MPH — two unrelated blobs far apart once produced "1111 mph".
+    Origin: extended back to the impact frame, the track must start within max(3 ball
+    diameters, one frame's travel) of the resting spot — IMG_0318 sent 46 mph at 74° from a
+    "track" near the top of the frame that could not have come from the ball.
     """
     if len(positions) < min_steps + 1:
         return False
@@ -181,31 +201,102 @@ def track_is_plausible(
              for (f0, x0, y0), (f1, x1, y1) in zip(positions, positions[1:])]
     ball_diameter_px = 42.67 * px_per_mm
     max_step_px = MAX_BALL_SPEED_MPH * 447.04 / fps * px_per_mm  # mph → mm/s is ×447.04
-    return float(np.median(steps)) >= 0.5 * ball_diameter_px and max(steps) <= max_step_px
+    if float(np.median(steps)) < 0.5 * ball_diameter_px or max(steps) > max_step_px:
+        return False
+    if address is not None and impact is not None:
+        (f0, x0, y0), (f1, x1, y1) = positions[0], positions[1]
+        vx, vy = (x1 - x0) / (f1 - f0), (y1 - y0) / (f1 - f0)
+        back = f0 - impact
+        ox, oy = x0 - vx * back, y0 - vy * back
+        tolerance = max(3 * ball_diameter_px, float(np.hypot(vx, vy)))
+        if np.hypot(ox - address[0], oy - address[1]) > tolerance:
+            return False
+    return True
 
 
 def rank_spots(
-    spots: list[tuple["RestCluster", int, float]],
+    spots: list[tuple["RestCluster", int, float, int]],
     window: int = 2,
     crowd: int = 2,
-    full_rest_samples: int = 40,
+    full_rest_frames: int = 240,
+    full_detections: int = 40,
 ) -> list[tuple["RestCluster", int, float]]:
     """
-    Order (cluster, impact, vanish_score) candidates, most ball-like first.
+    Order (cluster, impact, vanish_score, rest_frames) candidates, most ball-like first.
 
     - A struck ball vanishes alone. When the feet pivot in the follow-through, many spots
       change in the same frame; a spot whose impact is shared (±window frames) by more than
       `crowd` other spots has its score divided by the number sharing it.
-    - The ball rests at address for a second or more; spots seen in fewer than
-      full_rest_samples sampled frames are scaled down proportionally.
+    - The ball rests at address for a second or more. Rest is measured from the spot's own
+      signal (unbroken run ending at impact), not from how often the candidate finder saw it —
+      a ball in shade may be detected rarely yet sit still for 4 s (IMG_0323). Spots resting
+      under full_rest_frames (1 s at 240 fps) are scaled down proportionally.
+    - Spots the candidate finder rarely saw (< full_detections samples) are also scaled down:
+      background things (a dog, a toy) can sit "still" in a patch for a long time too.
+    This is the fallback order; the pipeline first prefers spots that leave a round,
+    ball-sized hole (is_ball_hole).
     Returns (cluster, impact, adjusted_score), best first.
     """
-    impacts = np.asarray([imp for _, imp, _ in spots])
+    impacts = np.asarray([sp[1] for sp in spots])
     ranked = []
-    for c, imp, score in spots:
+    for c, imp, score, rest in spots:
         sharing = int(np.count_nonzero(np.abs(impacts - imp) <= window)) - 1
         adj = score / (1 + sharing) if sharing > crowd else score
-        adj *= min(1.0, len(c.frames) / full_rest_samples)
+        adj *= min(1.0, rest / full_rest_frames)
+        adj *= min(1.0, len(c.frames) / full_detections) ** 0.5
         ranked.append((c, imp, adj))
     ranked.sort(key=lambda t: -t[2])
     return ranked
+
+
+def hole_shape(
+    frames_gray: list[np.ndarray],
+    impact: int,
+    cx: float,
+    cy: float,
+    after: int = 8,
+    search: int = 36,
+    diff_threshold: int = 25,
+) -> tuple[float, float] | None:
+    """
+    Shape of the hole a spot leaves at impact, on the (small) grayscale frames.
+
+    Compares the frame 3 before impact with one `after` frames later around (cx, cy) — same
+    scale as frames_gray — and returns (equivalent radius, circularity) of the changed blob
+    centred on the spot, or None. A struck ball leaves a clean round hole the size of the ball;
+    a shoe turning, a dog walking past or a shadow shifting leaves an irregular or huge change.
+    """
+    if impact - 3 < 0 or impact + after >= len(frames_gray):
+        return None
+    a = cv2.GaussianBlur(frames_gray[impact - 3], (3, 3), 0)
+    b = cv2.GaussianBlur(frames_gray[impact + after], (3, 3), 0)
+    H, W = a.shape[:2]
+    x0, y0 = max(0, int(cx) - search), max(0, int(cy) - search)
+    x1, y1 = min(W, int(cx) + search), min(H, int(cy) + search)
+    mask = (cv2.absdiff(a[y0:y1, x0:x1], b[y0:y1, x0:x1]) > diff_threshold).astype(np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
+    px, py = cx - x0, cy - y0
+    best = None
+    for i in range(1, n):
+        d = float(np.hypot(centroids[i][0] - px, centroids[i][1] - py))
+        if d < max(4.0, 0.6 * stats[i][2]) and (best is None or d < best[0]):
+            best = (d, i)
+    if best is None:
+        return None
+    contours, _ = cv2.findContours((labels == best[1]).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnt = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(cnt)
+    (_, _), enc_r = cv2.minEnclosingCircle(cnt)
+    if enc_r <= 0:
+        return None
+    return float(np.sqrt(area / np.pi)), float(area / (np.pi * enc_r * enc_r))
+
+
+def is_ball_hole(shape: tuple[float, float] | None, scale: float = 1.0,
+                 r_range: tuple[float, float] = (10.0, 80.0), min_circularity: float = 0.4) -> bool:
+    """Round, ball-sized hole? shape from hole_shape; scale converts its radius to full-res px."""
+    if shape is None:
+        return False
+    r, circ = shape[0] * scale, shape[1]
+    return r_range[0] <= r <= r_range[1] and circ >= min_circularity

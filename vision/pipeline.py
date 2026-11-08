@@ -3,8 +3,8 @@
 import cv2
 import numpy as np
 
-from .calibration import BALL_DIAMETER_MM, refine_ball_radius, white_blob_candidates
-from .impact import ball_patch_signal, impact_from_signal, rank_spots, resting_clusters, track_is_plausible, vanish_score
+from .calibration import BALL_DIAMETER_MM, refine_ball_radius, vanished_ball_radius, white_blob_candidates
+from .impact import ball_patch_signal, hole_shape, impact_from_signal, is_ball_hole, rank_spots, rest_frames, resting_clusters, track_is_plausible, vanish_score
 from .tracker import track_ball
 from .overlay import draw_overlay
 from .clipinfo import measured_fps
@@ -15,6 +15,7 @@ DETECT_SCALE = 2    # ball candidates are found on 1/DETECT_SCALE-size colour fr
 SAMPLE_EVERY = 6    # ... every N frames (25 ms at 240 fps)
 WINDOW_PRE = 15     # full-res frames kept before impact (radius refinement, tracker background)
 WINDOW_POST = 15    # ... and after (tracker uses up to 8)
+HOLE_AFTER = 8      # frames after impact for measuring the hole the ball left (club gone by then)
 MAX_SPOTS = 4       # resting spots to try tracking from, best first
 
 
@@ -70,11 +71,17 @@ def run(
         sig = ball_patch_signal(small, c.cx / SCALE, c.cy / SCALE, c.r / SCALE, c.frames)
         impact = impact_from_signal(sig)
         if impact is not None and (score := vanish_score(sig, impact)) > 0:
-            spots.append((c, impact, score))
-    del small
+            spots.append((c, impact, score, rest_frames(sig, impact)))
     if not spots:
         raise RuntimeError("No shot detected — no resting ball that later left its spot")
-    spots = rank_spots(spots)
+    ranked = rank_spots(spots)
+    # Spots that leave a round, ball-sized hole at impact go first (roundest first) — only the
+    # struck ball does that. The heuristic ranking orders the rest as a fallback.
+    holes = {id(c): hole_shape(small, imp, c.cx / SCALE, c.cy / SCALE) for c, imp, _ in ranked}
+    with_hole = sorted((sp for sp in ranked if is_ball_hole(holes[id(sp[0])], SCALE)),
+                       key=lambda sp: -holes[id(sp[0])][1])
+    spots = with_hole + [sp for sp in ranked if not is_ball_hole(holes[id(sp[0])], SCALE)]
+    del small
 
     result, result_ok = None, False
     for c, impact_idx, _ in spots[:MAX_SPOTS]:
@@ -82,18 +89,29 @@ def run(
         hi = min(len(timestamps_ms), impact_idx + WINDOW_POST + 1)
         frames = _read_window(clip_path, timestamps_ms, lo, hi)
 
-        ppm = px_per_mm
+        ppm, scale_source = px_per_mm, "given"
         if ppm is None:
-            # Pre-impact frames, stopping short of impact (club may be arriving)
-            r_px = refine_ball_radius(frames[: max(1, impact_idx - lo - 3)], c.cx, c.cy, c.r)
-            ppm = 2 * (r_px if r_px is not None else c.r) / BALL_DIAMETER_MM
+            k = impact_idx - lo
+            hole_r = None
+            if k - 3 >= 0 and k + HOLE_AFTER < len(frames):
+                hole_r = vanished_ball_radius(frames[k - 3], frames[k + HOLE_AFTER], c.cx, c.cy)
+            if hole_r is not None:
+                r_px, scale_source = hole_r, "hole"
+            else:
+                # Fallback: ball at address, pre-impact frames stopping short of impact
+                r_px = refine_ball_radius(frames[: max(1, k - 3)], c.cx, c.cy, c.r)
+                r_px, scale_source = (r_px, "address") if r_px is not None else (c.r, "candidate")
+            ppm = 2 * r_px / BALL_DIAMETER_MM
 
         attempt = track_ball(frames, impact_idx - lo, ppm, max_frames=8,
                              timestamps_ms=timestamps_ms[lo:hi],
                              address_pos=(int(round(c.cx)), int(round(c.cy))))
-        ok = track_is_plausible(attempt["positions"], ppm, fps=measured_fps(timestamps_ms) or fps)
+        local_impact = impact_idx - lo
+        ok = track_is_plausible(attempt["positions"], ppm, fps=measured_fps(timestamps_ms) or fps,
+                                address=(c.cx, c.cy), impact=local_impact)
         if result is None or (ok and not result_ok):
             result, result_ok, best = attempt, ok, (c, impact_idx, lo, frames)
+        attempt["scale_source"] = scale_source
         if ok:
             break
 
@@ -102,8 +120,8 @@ def run(
         result["ball_speed_mph"] = 0.0
 
     c, impact_idx, lo, frames = best
-    if px_per_mm is None and result_ok:
-        _rescale_from_flight(result)
+    if result_ok and result.get("scale_source") in ("address", "candidate"):
+        _rescale_from_flight(result)  # address measurements can be short; the hole one isn't
     result["positions"] = [(fi + lo, cx, cy) for fi, cx, cy in result["positions"]]
     result["impact_frame"] = impact_idx
     result["ball_address"] = (round(c.cx, 1), round(c.cy, 1))
@@ -118,7 +136,7 @@ def run(
     return result
 
 
-def _rescale_from_flight(result: dict, max_disagreement: float = 0.8) -> None:
+def _rescale_from_flight(result: dict, max_disagreement: float = 0.8, max_growth: float = 2.0) -> None:
     """
     Cross-check the address scale against the ball's size in flight.
 
@@ -126,13 +144,15 @@ def _rescale_from_flight(result: dict, max_disagreement: float = 0.8) -> None:
     markings split it, or a white background hides an edge (IMG_0294: radius 20 measured vs
     ~31 real → 124 mph instead of ~75). In flight it is a clean disc against sky or fence, and
     the short axis of its blur ellipse is its true diameter. Flight detections can be partial
-    (smaller) but rarely larger, so the largest is used. If the address radius is under
+    (smaller) but rarely larger, so the largest plausible one (≤ max_growth × address) is used. If the address radius is under
     max_disagreement × that, rescale: speed ∝ 1/px_per_mm, VLA is unaffected.
     """
-    radii = result.get("flight_radii") or []
+    addr_r = result["px_per_mm"] * BALL_DIAMETER_MM / 2
+    # A flight blob far bigger than the ball (merged with the club or a passing object —
+    # IMG_0316 read 230 px vs 32 at address and sent 14 mph) is not the ball's size.
+    radii = [r for r in (result.get("flight_radii") or []) if r <= max_growth * addr_r]
     if not radii:
         return
-    addr_r = result["px_per_mm"] * BALL_DIAMETER_MM / 2
     flight_r = max(radii)
     if addr_r >= max_disagreement * flight_r:
         return

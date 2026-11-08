@@ -123,7 +123,7 @@ def white_blob_candidates(
     min_circularity: float = 0.3,
     min_radius: float = 5.0,
     window: int = 101,
-    min_contrast: float = 30.0,
+    thresholds: tuple[float, ...] = (30.0, 50.0, 70.0),
 ) -> list[tuple[float, float, float, float]]:
     """
     Cheap ball candidates: compact, roughly round blobs that are much whiter than their
@@ -134,29 +134,39 @@ def white_blob_candidates(
     (S ≈ 70, V ≈ 180) and fails fixed thresholds, while in sun a pale mat is itself fairly
     "white" — so only the local contrast is reliable.
 
+    The contrast mask is cut at several thresholds. In shade the ball's contrast is modest and
+    only the low cut finds it; on a sunlit, frosty mat the low cut joins the ball to bright
+    mat specks in one irregular blob (IMG_0320/0322) and only a higher cut separates it.
+    Round, ball-sized blobs from any cut are kept; overlapping ones are merged (roundest wins).
+
     Returns (cx, cy, r, circularity) in this frame's pixel coords. Deliberately permissive —
     background white objects come through too; the caller decides which candidate is the ball
-    by its behaviour (rests, then vanishes at impact, then flies). ~4 ms on a 960×540 frame,
-    vs ~500 ms for HoughCircles on full-res grass, which also returns hundreds of false circles.
+    by its behaviour (rests, then vanishes at impact, then flies).
     """
     h = frame_bgr.shape[0]
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     whiteness = np.clip(hsv[..., 2].astype(np.int16) - hsv[..., 1], 0, 255).astype(np.float32)
     contrast = whiteness - cv2.blur(whiteness, (window, window))
-    mask = (contrast > min_contrast).astype(np.uint8) * 255
-    mask[: int(h * top_fraction)] = 0  # sky
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-        (x, y), r = cv2.minEnclosingCircle(cnt)
-        circ = area / (np.pi * r * r) if r > 0 else 0.0
-        if circ >= min_circularity and r >= min_radius:
-            out.append((float(x), float(y), float(r), float(circ)))
-    return out
+    contrast[: int(h * top_fraction)] = 0  # sky
+    kernel = np.ones((3, 3), np.uint8)
+    found: list[tuple[float, float, float, float]] = []
+    for thr in thresholds:
+        mask = cv2.morphologyEx((contrast > thr).astype(np.uint8) * 255, cv2.MORPH_OPEN, kernel)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area:
+                continue
+            (x, y), r = cv2.minEnclosingCircle(cnt)
+            circ = area / (np.pi * r * r) if r > 0 else 0.0
+            if circ < min_circularity or r < min_radius:
+                continue
+            dup = next((k for k, f in enumerate(found) if np.hypot(f[0] - x, f[1] - y) < max(f[2], r) * 0.5), None)
+            if dup is None:
+                found.append((float(x), float(y), float(r), float(circ)))
+            elif circ > found[dup][3]:
+                found[dup] = (float(x), float(y), float(r), float(circ))
+    return found
 
 
 def refine_ball_radius(frames_bgr: list[np.ndarray], cx: float, cy: float, r_est: float) -> float | None:
@@ -186,3 +196,48 @@ def refine_ball_radius(frames_bgr: list[np.ndarray], cx: float, cy: float, r_est
         if np.hypot(best[0] + x0 - cx, best[1] + y0 - cy) <= r_est * 1.5:
             radii.append(float(best[2]))
     return float(np.median(radii)) if radii else None
+
+
+def vanished_ball_radius(
+    before_bgr: np.ndarray,
+    after_bgr: np.ndarray,
+    cx: float,
+    cy: float,
+    search: int = 140,
+    diff_threshold: int = 25,
+    min_circularity: float = 0.5,
+) -> float | None:
+    """
+    Ball radius (px) from the hole it leaves: the region that changed at its resting spot
+    between a frame just before impact and one ~8 frames after (club gone, bare mat showing).
+
+    Only the ball changed there, so this outlines the ball itself regardless of lighting,
+    shading or markings — which break measurements made on the ball at address (alignment
+    line splitting it, shaded underside merging into the mat, sunlit mat specks joining it).
+    Radius from the blob's area (≈ true radius within ~3% on clips with known scale).
+    Returns None if no round changed blob sits at the spot.
+    """
+    H, W = before_bgr.shape[:2]
+    x0, y0 = max(0, int(cx) - search), max(0, int(cy) - search)
+    x1, y1 = min(W, int(cx) + search), min(H, int(cy) + search)
+    a = cv2.GaussianBlur(cv2.cvtColor(before_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    b = cv2.GaussianBlur(cv2.cvtColor(after_bgr[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY), (5, 5), 0)
+    mask = (cv2.absdiff(a, b) > diff_threshold).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    n, labels, _, centroids = cv2.connectedComponentsWithStats(mask)
+    px, py = cx - x0, cy - y0
+    best = None
+    for i in range(1, n):
+        dist = float(np.hypot(centroids[i][0] - px, centroids[i][1] - py))
+        if dist < 60 and (best is None or dist < best[0]):
+            best = (dist, i)
+    if best is None:
+        return None
+    contours, _ = cv2.findContours((labels == best[1]).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cnt = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(cnt)
+    (_, _), enc_r = cv2.minEnclosingCircle(cnt)
+    if enc_r <= 0 or area / (np.pi * enc_r * enc_r) < min_circularity:
+        return None
+    return float(np.sqrt(area / np.pi))
