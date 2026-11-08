@@ -1,0 +1,91 @@
+# The player's measured averages (5–10 shots per club, measured 2025) — "known good"
+# calibration targets for tools/calibration_report.py. Yards; negative lateral = left.
+# Shared 2026-11-07. Total lateral dispersion and radius columns kept for reference.
+
+[clubs.sw]
+carry = 98.7
+carry_sd = 9.1
+lateral_avg = -5.2
+lateral_sd = 6.7
+lateral_total = 24.8
+radius = 11.9
+
+[clubs.pw]
+carry = 124.1
+carry_sd = 5.2
+lateral_avg = -7.7
+lateral_sd = 11.3
+lateral_total = 40.2
+radius = 19.0
+
+[clubs.9-iron]
+carry = 138.4
+carry_sd = 14.5
+lateral_avg = -12.8
+lateral_sd = 6.3
+lateral_total = 22.1
+radius = 19.0
+
+[clubs.8-iron]
+carry = 147.5
+carry_sd = 20.7
+lateral_avg = -18.5
+lateral_sd = 22.5
+lateral_total = 86.5
+radius = 41.0
+
+[clubs.7-iron]
+carry = 172.6
+carry_sd = 13.7
+lateral_avg = -49.7
+lateral_sd = 8.4
+lateral_total = 26.2
+radius = 58.1
+
+[clubs.6-iron]
+carry = 184.2
+carry_sd = 8.6
+lateral_avg = -33.6
+lateral_sd = 14.5
+lateral_total = 50.7
+radius = 48.2
+
+[clubs.5-iron]
+carry = 192.99
+carry_sd = 7.75
+lateral_avg = -29.81
+lateral_sd = 22.04
+lateral_total = 65.4
+radius = 22.04
+
+[clubs.4-iron]
+carry = 206.0
+carry_sd = 7.5
+lateral_avg = -22.9
+lateral_sd = 4.15
+lateral_total = 14.0
+radius = 27.0
+
+[clubs.3-iron]
+carry = 212.3
+carry_sd = 18.9
+lateral_avg = -24.0
+lateral_sd = 19.7
+lateral_total = 77.3
+radius = 27.3
+
+[clubs.3-wood]
+carry = 214.0
+carry_sd = 18.3
+lateral_avg = -42.9
+lateral_sd = 33.0
+lateral_total = 99.3
+radius = 37.8
+
+[clubs.driver]
+carry = 226.4
+carry_sd = 20.0
+lateral_avg = -45.5
+lateral_sd = 31.3
+lateral_total = 82.9
+radius = 37.1
