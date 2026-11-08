@@ -64,6 +64,18 @@ def post_shot(relay_url: str, shot: dict) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 
+DEFAULT_SPOT_FILE = Path(__file__).resolve().parent.parent / "logs" / "ball_spot.json"
+
+
+def load_ball_spot(path: str | Path = DEFAULT_SPOT_FILE) -> tuple[float, float, float] | None:
+    """(x, y, r) saved by tools/set_ball_spot.py, or None if not calibrated."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text())
+    return float(d["x"]), float(d["y"]), float(d["r"])
+
+
 def quick_fps(clip: str, n: int = 60) -> float | None:
     """Measured fps from the first n frames' timestamps (cheap: grab only, no decode to BGR)."""
     import cv2
@@ -91,6 +103,7 @@ def process_clip(
     log_path: str = "logs/shot_model.jsonl",
     dry_run: bool = False,
     min_fps: float | None = None,
+    ball_spot: tuple[float, float, float] | None = None,
 ) -> dict:
     """
     Clip → vision → shotmodel → relay. Prints progress; raises ShotFailed on failure.
@@ -103,7 +116,7 @@ def process_clip(
 
     print(f"Running vision pipeline on {clip} ...")
     try:
-        result = run_pipeline(clip, px_per_mm=px_per_mm)
+        result = run_pipeline(clip, px_per_mm=px_per_mm, ball_spot=ball_spot)
     except Exception as e:
         raise ShotFailed(f"vision pipeline failed: {e}") from e
 
@@ -197,12 +210,14 @@ def main() -> int:
     parser.add_argument("--config", default=None, help="Shot model config (default config/shot_model.toml)")
     parser.add_argument("--log", default="logs/shot_model.jsonl", help="Shot model log path")
     parser.add_argument("--dry-run", action="store_true", help="Print shot but don't send (history not updated)")
+    parser.add_argument("--spot", default=None, help="Ball spot file from tools/set_ball_spot.py (default: none)")
     args = parser.parse_args()
 
     try:
         process_clip(args.clip, load_config(args.config), relay_url=args.relay, px_per_mm=args.calib,
                      club_name=args.club, handicap=args.handicap, seed=args.seed,
-                     log_path=args.log, dry_run=args.dry_run)
+                     log_path=args.log, dry_run=args.dry_run,
+                     ball_spot=load_ball_spot(args.spot) if args.spot else None)
     except ShotFailed as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

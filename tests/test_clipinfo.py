@@ -40,3 +40,10 @@ def test_scale_kept_when_address_and_flight_agree():
     r = {"px_per_mm": 1.35, "ball_speed_mph": 81.0, "flight_radii": [22.8, 27.9, 26.5], "warnings": []}
     _rescale_from_flight(r)
     assert r["ball_speed_mph"] == 81.0 and not r["warnings"]
+
+
+def test_huge_flight_blob_ignored_for_scale():
+    # IMG_0316: a 230 px "ball" in flight vs 32 at address rescaled 7x and sent 14 mph
+    r = {"px_per_mm": 2 * 32 / 42.67, "ball_speed_mph": 98.0, "flight_radii": [230.0, 30.0], "warnings": []}
+    _rescale_from_flight(r)
+    assert r["ball_speed_mph"] == 98.0 and not r["warnings"]

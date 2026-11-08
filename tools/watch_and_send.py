@@ -27,7 +27,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from afc_source import AfcSource  # noqa: E402
-from clip_to_sim import ShotFailed, process_clip  # noqa: E402
+from clip_to_sim import DEFAULT_SPOT_FILE, ShotFailed, fetch_current_club, load_ball_spot, process_clip  # noqa: E402
+from relay.logger import ShotLogger  # noqa: E402
+
+OUTCOME_LOG = ROOT / "logs" / "watch_outcomes.jsonl"  # every clip's outcome, for tools/calibration_report.py
 from shotmodel import load_config  # noqa: E402
 
 VIDEO_EXTS = {".mov", ".mp4", ".m4v"}
@@ -174,6 +177,8 @@ def short_reason(err: ShotFailed) -> str:
         return "Relay not reachable."
     if "fps" in msg:
         return "Clip is not slow motion. Set the camera to slow mo."
+    if "calibrated ball spot" in msg:
+        return "No ball on the tee mark."
     return "Ball not tracked."
 
 
@@ -191,6 +196,8 @@ def main() -> int:
     parser.add_argument("--voice", default=None, help="macOS `say` voice")
     parser.add_argument("--no-speak", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Process but don't send to relay")
+    parser.add_argument("--no-spot", action="store_true",
+                        help="Ignore the calibrated ball spot (tools/set_ball_spot.py) and search the whole frame")
     args = parser.parse_args()
 
     inbox = Path(args.inbox)
@@ -207,6 +214,11 @@ def main() -> int:
 
     usb = start_usb(inbox, speaker) if args.source == "usb" else None
     print(f"Watching {inbox} (source: {args.source}{', DRY RUN' if args.dry_run else ''}). Ctrl-C to stop.")
+    spot = None if args.no_spot else load_ball_spot()
+    if spot:
+        print(f"Ball spot: ({spot[0]:.0f}, {spot[1]:.0f}) from {DEFAULT_SPOT_FILE}")
+    else:
+        print("No ball spot calibrated — searching the whole frame (run tools/set_ball_spot.py)")
     if args.source == "dir":
         speaker.say("Watching for shots.", READY_SOUND)
 
@@ -226,9 +238,14 @@ def main() -> int:
                 print(f"\n=== {clip.name} ===")
                 t0 = time.time()
                 try:
+                    spot = None if args.no_spot else load_ball_spot()  # re-read: recalibration applies next shot
                     s = process_clip(str(clip), cfg, relay_url=args.relay, club_name=args.club,
-                                     handicap=args.handicap, dry_run=args.dry_run, min_fps=args.min_fps)
+                                     handicap=args.handicap, dry_run=args.dry_run, min_fps=args.min_fps,
+                                     ball_spot=spot)
                 except ShotFailed as e:
+                    ShotLogger(str(OUTCOME_LOG)).log({"event": "failed", "clip": clip.name, "reason": str(e),
+                                                       "club": args.club or fetch_current_club(args.relay),
+                                                       "dry_run": args.dry_run})
                     print(f"SHOT FAILED: {e}", file=sys.stderr)
                     speaker.say(f"Shot failed. {short_reason(e)} Re-hit or play it manually.", FAIL_SOUND)
                     move_to(clip, "failed")
@@ -239,6 +256,9 @@ def main() -> int:
                     move_to(clip, "failed")
                     continue
                 shots += 1
+                ShotLogger(str(OUTCOME_LOG)).log({"event": "sent" if not args.dry_run else "dry_run", "clip": clip.name,
+                                                   "club": s["club"], "speed": s["speed"], "vla": s["vla"],
+                                                   "shot": s["shot"], "shot_id": s["shot_id"]})
                 print(f"Processed in {time.time() - t0:.1f}s")
                 speaker.say(spoken_result(s["club"], s["speed"], s["vla"]))
                 move_to(clip, "done")
