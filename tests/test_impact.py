@@ -43,6 +43,15 @@ def test_waggle_before_impact_ignored():
     assert impact_from_signal(s) == 400
 
 
+def test_low_contrast_mat_drifting_toward_ball_level_still_gone():
+    # IMG_0338 regression (dusk, dewy mat): ball ~1, bare mat only ~23 after impact, drifting
+    # down to ~11 as the light fades. A fixed 15-level margin read the tail as "ball back".
+    n, impact = 1966, 1021
+    s = ball_signal(n=n, impact=impact, rest=1.0, mat=23.0, noise=0.3)
+    s[1600:] = np.linspace(21.0, 11.0, n - 1600)
+    assert impact_from_signal(s) == impact
+
+
 def test_ball_never_leaves_returns_none():
     assert impact_from_signal(np.full(600, 3.0)) is None
 
@@ -119,6 +128,15 @@ def test_impossible_speed_rejected():
 def test_fast_real_shot_still_plausible():
     # ~170 mph driver at 1.0 px/mm: 170 * 447.04 / 240 ≈ 317 px/frame — under the 220 mph cap
     assert track_is_plausible([(0, 100, 500), (1, 417, 480), (2, 734, 460)], 1.0)
+
+
+def test_steep_launch_rejected():
+    # Plausible speed, but ~79° up: no full shot launches that steeply (IMG_0292 misread)
+    assert not track_is_plausible([(0, 500, 500), (1, 520, 400), (2, 540, 300)], 1.2)
+
+
+def test_backward_launch_rejected():
+    assert not track_is_plausible([(0, 500, 500), (1, 400, 450), (2, 300, 400)], 1.2)
 
 
 # --- rank_spots --------------------------------------------------------------
