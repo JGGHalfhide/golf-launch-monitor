@@ -18,6 +18,7 @@ WINDOW_POST = 15    # ... and after (tracker uses up to 8)
 HOLE_AFTER = 8      # frames after impact for measuring the hole the ball left (club gone by then)
 MAX_SPOTS = 4       # resting spots to try tracking from, best first
 SPOT_TOLERANCE = 3  # with a calibrated ball spot: max distance (in ball radii) of the resting ball
+TRACK_RETRIES = 2   # re-track skipping a bad first detection (clubhead) when a track is implausible
 
 
 def run(
@@ -114,12 +115,20 @@ def run(
                 r_px, scale_source = (r_px, "address") if r_px is not None else (c.r, "candidate")
             ppm = 2 * r_px / BALL_DIAMETER_MM
 
-        attempt = track_ball(frames, impact_idx - lo, ppm, max_frames=8,
-                             timestamps_ms=timestamps_ms[lo:hi],
-                             address_pos=(int(round(c.cx)), int(round(c.cy))))
         local_impact = impact_idx - lo
-        ok = track_is_plausible(attempt["positions"], ppm, fps=measured_fps(timestamps_ms) or fps,
-                                address=(c.cx, c.cy), impact=local_impact)
+        start_after = None
+        for _ in range(1 + TRACK_RETRIES):
+            attempt = track_ball(frames, local_impact, ppm, max_frames=8,
+                                 timestamps_ms=timestamps_ms[lo:hi],
+                                 address_pos=(int(round(c.cx)), int(round(c.cy))),
+                                 start_after=start_after)
+            ok = track_is_plausible(attempt["positions"], ppm, fps=measured_fps(timestamps_ms) or fps,
+                                    address=(c.cx, c.cy), impact=local_impact)
+            if ok or not attempt["positions"]:
+                break
+            # First detection was likely the clubhead (it leaves with the ball and can look
+            # like a blurred ball); retry with the ball's first appearance after it.
+            start_after = attempt["positions"][0][0]
         if result is None or (ok and not result_ok):
             result, result_ok, best = attempt, ok, (c, impact_idx, lo, frames)
         attempt["scale_source"] = scale_source

@@ -106,11 +106,14 @@ def impact_from_signal(
     min_run: int = 48,
     margin: float = 15.0,
     min_gone: int = 12,
+    min_margin: float = 6.0,
 ) -> int | None:
     """
     Impact frame from a ball-patch signal (see ball_patch_signal).
 
-    "Present" = within `margin` grey levels of the resting-ball level (10th percentile).
+    "Present" = within `margin` grey levels of the resting-ball level (10th percentile), the
+    margin shrinking to a third of the clip's contrast (90th − 10th percentile) when that is
+    small, but never below `min_margin` (sensor noise).
     Anything else — bare mat, a shoe, the club — counts as gone; how different it is doesn't
     matter. Impact is the last frame of the final run of ≥ min_run consecutive present frames
     (default 0.2 s at 240 fps — a ball at address rests far longer), so something briefly
@@ -120,7 +123,13 @@ def impact_from_signal(
     s = np.asarray(signal, dtype=float)
     if s.size < min_run + min_gone:
         return None
-    present = s < float(np.percentile(s, 10)) + margin
+    rest = float(np.percentile(s, 10))
+    # Low contrast (pale ball on a pale/dewy mat, dull light): the bare spot can sit only ~20
+    # grey levels from the ball and drift closer as the light changes, so a fixed margin later
+    # reads the empty spot as "ball back". Cap the margin at a third of the clip's contrast.
+    contrast = float(np.percentile(s, 90)) - rest
+    margin = min(margin, max(min_margin, contrast / 3))
+    present = s < rest + margin
 
     run = 0
     last_end = None
@@ -174,6 +183,7 @@ def rest_frames(signal: np.ndarray, impact: int, margin: float = 15.0) -> int:
 
 
 MAX_BALL_SPEED_MPH = 220.0  # comfortably above any real shot (tour driver ≈ 190 mph)
+LAUNCH_ANGLE_RANGE = (-10.0, 65.0)  # degrees; even a lob wedge launches under ~50°
 
 
 def track_is_plausible(
@@ -194,6 +204,7 @@ def track_is_plausible(
     Origin: extended back to the impact frame, the track must start within max(3 ball
     diameters, one frame's travel) of the resting spot — IMG_0318 sent 46 mph at 74° from a
     "track" near the top of the frame that could not have come from the ball.
+    Direction: launch angle must lie in LAUNCH_ANGLE_RANGE (IMG_0292 once read 79°).
     """
     if len(positions) < min_steps + 1:
         return False
@@ -202,6 +213,10 @@ def track_is_plausible(
     ball_diameter_px = 42.67 * px_per_mm
     max_step_px = MAX_BALL_SPEED_MPH * 447.04 / fps * px_per_mm  # mph → mm/s is ×447.04
     if float(np.median(steps)) < 0.5 * ball_diameter_px or max(steps) > max_step_px:
+        return False
+    (_, xa, ya), (_, xb, yb) = positions[0], positions[-1]
+    launch_deg = float(np.degrees(np.arctan2(ya - yb, xb - xa)))  # image y is down
+    if not LAUNCH_ANGLE_RANGE[0] <= launch_deg <= LAUNCH_ANGLE_RANGE[1]:
         return False
     if address is not None and impact is not None:
         (f0, x0, y0), (f1, x1, y1) = positions[0], positions[1]

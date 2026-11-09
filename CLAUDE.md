@@ -116,14 +116,16 @@ Full field ranges and confirmed framing details: **[docs/sim-protocol.md](docs/s
 **Phase 3 — Calibration. The full loop works (iPhone → USB → vision → shot model → relay → OpenGolfSim → spoken result); readings must now be made reliable and calibrated to the player's known averages.**
 
 ### Start here next session
-1. **PR #2 (`vision-hole-scale`) is open, not merged** — vision fixes from the first live session, ball-spot calibration, player targets, calibration report. Merge it (or check it out) before working.
-2. **Bag run** when the user says so: start `python -m relay` and `python tools/watch_and_send.py` (live, no `--dry-run`); OpenGolfSim range open; user selects each club in the sim and hits 5–8 shots per club; optional `tools/set_ball_spot.py` once at the start.
+1. **PR `vision-low-light`** (low-light fixes from the 2026-11-09 dusk session) — merge it (or check it out) before working. PR #2 is merged.
+2. **Bag run** when the user says so. Sessions are short daylight windows (~20–30 min): start early, hit ONE shot first and confirm it reads before the full set; if shots fail mid-session keep capturing (clips land in `inbox/failed/`) and debug offline afterwards. start `python -m relay` and `python tools/watch_and_send.py` (live, no `--dry-run`); OpenGolfSim range open; user selects each club in the sim and hits 5–8 shots per club; optional `tools/set_ball_spot.py` once at the start.
 3. Afterwards: review every clip (frames around impact, are the detections really the ball?), `--exclude` confirmed misreads, then `python tools/calibration_report.py`.
 4. Tune toward `config/player_targets.toml`: similar carry Δ% across clubs → speed-measurement scale; uneven → per-club spin/launch in `config/shot_model.toml`. Target ≈ ±5% average carry per club. "Good enough", not perfect.
 
 **Constraints (from the user):** outdoor setup is mat + net only — never propose backdrops, curtains or other equipment. Free changes (tripod position/angle, framing) are fine to suggest. Per-session steps must stay minimal.
 
 **Known state of accuracy (2026-11-08, 16-clip live session, re-run on current code):** ~half of clips read believably; the rest fail safely ("ball not tracked") or misread. Main causes: ball leaves the frame in 2–3 frames at 3W/7i speed (camera close, ball ~70 px), cluttered background (white slides, toys, people, dog), dappled sun. One confirmed misread is excluded (14.1 mph on a full, clean 7i). Sim carry vs targets so far: 7i −30%, 3W −21%, SW −7% (few shots) — speed measurement vs sim/spin model not yet separated.
+
+**2026-11-09 dusk session (5 PW, all failed live, then fixed offline):** low light → low-contrast ball on a dewy mat (impact detector thought the ball never left) and a motion-blurred, capsule-shaped ball in flight (tracker rejected it as not round); clubhead taken as the first detection. Fixed in `vision-low-light`: contrast-adaptive impact margin, ellipse-based blurred-ball shape test, re-track skipping a bad first detection, launch angle bounded to −10…65°. Now 2/5 read (75.6 mph/26°, 68.5 mph/31°); remaining failures: ball teed outside the calibrated spot, dog standing on the spot late in the clip. Camera is now face-on at ground level, ball ~48 px. Keep clips short (stop right after impact).
 
 **Simulator options:** staying on OpenGolfSim (free; small course library). Awesome Golf has no third-party/API input — only its partner launch monitors. GSPro has an open "Open Connect" API (JSON over TCP) and thousands of community courses; adding it as a second relay output would be a modest change if the user wants more courses.
 

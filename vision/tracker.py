@@ -36,6 +36,29 @@ def find_impact_frame(frames: list[np.ndarray], start: int = 0) -> int:
     return max(diffs, key=lambda x: x[1])[0]
 
 
+def is_blurred_ball_shape(minor_r: float, major_r: float, area: float, expected_r: float) -> bool:
+    """
+    A motion-blurred ball: a solid capsule whose short half-axis is still about the ball's
+    radius, stretched along its path. In dull light (long exposure) a struck ball smears to
+    2–3 diameters long and fails the plain roundness test (IMG_0338: roundness 0.33–0.38),
+    while its ellipse fill stays ≥ 0.9. A shaft's short axis is a few px; clutter and merged
+    club/leg blobs fill their ellipse poorly.
+    """
+    if minor_r <= 0 or major_r <= 0:
+        return False
+    fill = area / (np.pi * minor_r * major_r)
+    return (0.6 * expected_r <= minor_r <= 1.4 * expected_r
+            and major_r <= 4.0 * expected_r
+            and fill >= 0.85)
+
+
+def _is_blurred_ball(cnt, area: float, expected_r: float) -> bool:
+    if len(cnt) < 5:
+        return False
+    w1, w2 = cv2.fitEllipse(cnt)[1]
+    return is_blurred_ball_shape(min(w1, w2) / 2, max(w1, w2) / 2, area, expected_r)
+
+
 def _find_ball_post_impact(
     frame,
     background,
@@ -91,7 +114,7 @@ def _find_ball_post_impact(
             continue  # the hole the ball left behind
         (_, _), enc_r = cv2.minEnclosingCircle(cnt)
         roundness = area / (np.pi * enc_r * enc_r) if enc_r > 0 else 0.0
-        if roundness < min_roundness:
+        if roundness < min_roundness and not _is_blurred_ball(cnt, area, expected_r):
             continue
 
         mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
@@ -116,9 +139,11 @@ def track_ball(
     max_frames: int = 8,
     timestamps_ms: list[float] | None = None,
     address_pos: tuple[int, int] | None = None,
+    start_after: int | None = None,
 ) -> dict:
     """
-    Track from impact_idx.
+    Track from impact_idx (or from the frame after start_after, if given — used to retry
+    when the first detection was the clubhead rather than the ball).
     Uses background subtraction with directional constraints post-impact.
 
     Returns dict with positions, ball_speed_mph, vertical_launch_angle_deg, etc.
@@ -149,13 +174,14 @@ def track_ball(
     min_x_post = addr_x - expected_r * 2
     max_y_post = addr_y + expected_r
 
-    end_idx = min(impact_idx + max_frames + 1, len(frames))
+    first = impact_idx + 1 if start_after is None else start_after + 1
+    end_idx = min(first + max_frames, len(frames))
     max_misses = 2          # once tracking: ball can be hidden behind the shaft for a frame or two
     max_initial_search = 5  # frames after impact to find the ball's first clean appearance
 
     # Only track post-impact frames for velocity (ball is stationary at impact)
     misses = 0
-    for fi in range(impact_idx + 1, end_idx):
+    for fi in range(first, end_idx):
         frame = frames[fi]
         predicted = gate = None
         if len(positions) >= 2:
@@ -191,7 +217,7 @@ def track_ball(
         elif not positions:
             # Right after impact the ball is often tangled with the clubhead or passing in front
             # of something white; keep looking for its first clean appearance.
-            if fi - impact_idx >= max_initial_search:
+            if fi - first + 1 >= max_initial_search:
                 break
         else:
             misses += 1
