@@ -76,6 +76,20 @@ def load_ball_spot(path: str | Path = DEFAULT_SPOT_FILE) -> tuple[float, float, 
     return float(d["x"]), float(d["y"]), float(d["r"])
 
 
+def load_session_scale(path: str | Path = DEFAULT_SPOT_FILE) -> float | None:
+    """Session px/mm measured by tools/set_ball_spot.py at the tee spot, or None.
+
+    The tripod is fixed for a session, so one scale measured over many address frames beats
+    per-shot estimates (2026-11-13: per-shot scale scattered 0.49–0.99 px/mm on a 0.74 setup,
+    giving 155–180 mph misreads on 8i/driver).
+    """
+    p = Path(path)
+    if not p.exists():
+        return None
+    v = json.loads(p.read_text()).get("px_per_mm")
+    return float(v) if v else None
+
+
 def quick_fps(clip: str, n: int = 60) -> float | None:
     """Measured fps from the first n frames' timestamps (cheap: grab only, no decode to BGR)."""
     import cv2
@@ -210,11 +224,12 @@ def main() -> int:
     parser.add_argument("--config", default=None, help="Shot model config (default config/shot_model.toml)")
     parser.add_argument("--log", default="logs/shot_model.jsonl", help="Shot model log path")
     parser.add_argument("--dry-run", action="store_true", help="Print shot but don't send (history not updated)")
-    parser.add_argument("--spot", default=None, help="Ball spot file from tools/set_ball_spot.py (default: none)")
+    parser.add_argument("--spot", default=None, help="Ball spot file from tools/set_ball_spot.py (default: none); its session px/mm is used unless --calib")
     args = parser.parse_args()
 
     try:
-        process_clip(args.clip, load_config(args.config), relay_url=args.relay, px_per_mm=args.calib,
+        px_per_mm = args.calib or (load_session_scale(args.spot) if args.spot else None)
+        process_clip(args.clip, load_config(args.config), relay_url=args.relay, px_per_mm=px_per_mm,
                      club_name=args.club, handicap=args.handicap, seed=args.seed,
                      log_path=args.log, dry_run=args.dry_run,
                      ball_spot=load_ball_spot(args.spot) if args.spot else None)
