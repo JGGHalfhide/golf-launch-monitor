@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from afc_source import AfcSource  # noqa: E402
-from clip_to_sim import DEFAULT_SPOT_FILE, ShotFailed, fetch_current_club, load_ball_spot, process_clip  # noqa: E402
+from clip_to_sim import DEFAULT_SPOT_FILE, ShotFailed, fetch_current_club, load_ball_spot, load_session_scale, process_clip  # noqa: E402
 from relay.logger import ShotLogger  # noqa: E402
 
 OUTCOME_LOG = ROOT / "logs" / "watch_outcomes.jsonl"  # every clip's outcome, for tools/calibration_report.py
@@ -217,6 +217,8 @@ def main() -> int:
     spot = None if args.no_spot else load_ball_spot()
     if spot:
         print(f"Ball spot: ({spot[0]:.0f}, {spot[1]:.0f}) from {DEFAULT_SPOT_FILE}")
+        scale = load_session_scale()
+        print(f"Session scale: {scale:.3f} px/mm" if scale else "No session scale — measured per shot (re-run tools/set_ball_spot.py)")
     else:
         print("No ball spot calibrated — searching the whole frame (run tools/set_ball_spot.py)")
     if args.source == "dir":
@@ -239,7 +241,8 @@ def main() -> int:
                 t0 = time.time()
                 try:
                     spot = None if args.no_spot else load_ball_spot()  # re-read: recalibration applies next shot
-                    s = process_clip(str(clip), cfg, relay_url=args.relay, club_name=args.club,
+                    scale = None if args.no_spot else load_session_scale()
+                    s = process_clip(str(clip), cfg, relay_url=args.relay, club_name=args.club, px_per_mm=scale,
                                      handicap=args.handicap, dry_run=args.dry_run, min_fps=args.min_fps,
                                      ball_spot=spot)
                 except ShotFailed as e:

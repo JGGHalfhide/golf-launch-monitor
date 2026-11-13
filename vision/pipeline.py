@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 from .calibration import BALL_DIAMETER_MM, refine_ball_radius, vanished_ball_radius, white_blob_candidates
-from .impact import ball_patch_signal, hole_shape, impact_from_signal, is_ball_hole, rank_spots, rest_frames, resting_clusters, track_is_plausible, vanish_score
+from .impact import RestCluster, ball_patch_signal, hole_shape, impact_from_signal, is_ball_hole, rank_spots, rest_frames, resting_clusters, track_is_plausible, vanish_score
 from .tracker import track_ball
 from .overlay import draw_overlay
 from .clipinfo import measured_fps
@@ -17,7 +17,13 @@ WINDOW_PRE = 15     # full-res frames kept before impact (radius refinement, tra
 WINDOW_POST = 15    # ... and after (tracker uses up to 8)
 HOLE_AFTER = 8      # frames after impact for measuring the hole the ball left (club gone by then)
 MAX_SPOTS = 4       # resting spots to try tracking from, best first
-SPOT_TOLERANCE = 3  # with a calibrated ball spot: max distance (in ball radii) of the resting ball
+SPOT_TOLERANCE = 4    # with a calibrated ball spot: max sideways offset (ball radii) of the resting ball —
+                      # it is teed by eye, so it lands left/right of the mark
+SPOT_ABOVE = 0.5      # ... and vertical: the ball sits on the mat, never above the mark — spots higher
+                      # up are shoes / clubhead (IMG_0373/0375/0376/0387/0378)
+SPOT_BELOW = 1.5      # ... teed nearer the camera it sits lower in frame (5i/4i, IMG_0389–0394)
+SPOT_MIN_JUMP = 6.0  # calibrated-spot fallback: min grey-level jump (fixed 15 is too strict in shade)
+TRACK_RETRIES = 2   # re-track skipping a bad first detection (clubhead) when a track is implausible
 
 
 def run(
@@ -31,7 +37,7 @@ def run(
     Full pipeline. Returns the same dict as track_ball plus clip metadata.
 
     ball_spot: (x, y, r) of the calibrated tee spot in full-res pixels (tools/set_ball_spot.py).
-    When given, only resting spots within SPOT_TOLERANCE ball radii of it are considered —
+    When given, only resting spots within SPOT_TOLERANCE radii sideways, SPOT_ABOVE above, SPOT_BELOW below it are considered —
     no searching the whole frame, which is where most misidentifications came from.
 
     Pass 1 streams the clip once, keeping only small grayscale frames, timestamps and
@@ -80,7 +86,12 @@ def run(
             spots.append((c, impact, score, rest_frames(sig, impact)))
     if ball_spot is not None:
         sx, sy, sr = ball_spot
-        spots = [sp for sp in spots if np.hypot(sp[0].cx - sx, sp[0].cy - sy) <= SPOT_TOLERANCE * sr]
+        spots = [sp for sp in spots
+                 if abs(sp[0].cx - sx) <= SPOT_TOLERANCE * sr and -SPOT_ABOVE * sr <= sp[0].cy - sy <= SPOT_BELOW * sr]
+        # The candidate finder can miss a shaded, blue-tinted ball against a sunlit mat and
+        # fence (IMG_0369: whiteness contrast ~20–40, patchy). The spot is known, so also watch
+        # the area around it directly (reference = median over the whole clip).
+        spots += _calibrated_spot(small, sx, sy, sr)
         if not spots:
             raise RuntimeError("No shot detected at the calibrated ball spot — ball moved off the tee mark?")
     if not spots:
@@ -114,12 +125,20 @@ def run(
                 r_px, scale_source = (r_px, "address") if r_px is not None else (c.r, "candidate")
             ppm = 2 * r_px / BALL_DIAMETER_MM
 
-        attempt = track_ball(frames, impact_idx - lo, ppm, max_frames=8,
-                             timestamps_ms=timestamps_ms[lo:hi],
-                             address_pos=(int(round(c.cx)), int(round(c.cy))))
         local_impact = impact_idx - lo
-        ok = track_is_plausible(attempt["positions"], ppm, fps=measured_fps(timestamps_ms) or fps,
-                                address=(c.cx, c.cy), impact=local_impact)
+        start_after = None
+        for _ in range(1 + TRACK_RETRIES):
+            attempt = track_ball(frames, local_impact, ppm, max_frames=8,
+                                 timestamps_ms=timestamps_ms[lo:hi],
+                                 address_pos=(int(round(c.cx)), int(round(c.cy))),
+                                 start_after=start_after)
+            ok = track_is_plausible(attempt["positions"], ppm, fps=measured_fps(timestamps_ms) or fps,
+                                    address=(c.cx, c.cy), impact=local_impact)
+            if ok or not attempt["positions"]:
+                break
+            # First detection was likely the clubhead (it leaves with the ball and can look
+            # like a blurred ball); retry with the ball's first appearance after it.
+            start_after = attempt["positions"][0][0]
         if result is None or (ok and not result_ok):
             result, result_ok, best = attempt, ok, (c, impact_idx, lo, frames)
         attempt["scale_source"] = scale_source
@@ -174,6 +193,29 @@ def _rescale_from_flight(result: dict, max_disagreement: float = 0.8, max_growth
         f"scale taken from flight"
     )
     result["px_per_mm"] = new_ppm
+
+
+def _calibrated_spot(small: list[np.ndarray], sx: float, sy: float, sr: float, keep: int = 3) -> list:
+    """
+    Spot candidates watched directly around the calibrated ball spot (full-res sx, sy, sr).
+
+    The ball is teed by eye, so it lands up to ~SPOT_TOLERANCE radii from the mark (mostly
+    sideways). Scan a grid of half-radius steps over that area and keep the positions whose
+    patch vanishes most like a struck ball; the tracker then decides.
+    """
+    frames = list(range(0, len(small), SAMPLE_EVERY))
+    step = sr / 2
+    found = []
+    for dy in np.arange(-SPOT_ABOVE * sr, SPOT_BELOW * sr + 1e-6, step):
+        for dx in np.arange(-SPOT_TOLERANCE * sr, SPOT_TOLERANCE * sr + 1e-6, step):
+            x, y = sx + dx, sy + dy
+            sig = ball_patch_signal(small, x / SCALE, y / SCALE, sr / SCALE, frames)
+            impact = impact_from_signal(sig)
+            if impact is None or (score := vanish_score(sig, impact, margin=SPOT_MIN_JUMP)) <= 0:
+                continue
+            found.append((RestCluster(float(x), float(y), sr, 1.0, frames), impact, score, rest_frames(sig, impact)))
+    found.sort(key=lambda sp: -sp[2])
+    return found[:keep]
 
 
 def _read_window(clip_path: str, timestamps_ms: list[float], lo: int, hi: int) -> list[np.ndarray]:

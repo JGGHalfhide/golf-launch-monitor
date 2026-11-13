@@ -8,11 +8,15 @@ Usage:
     python tools/set_ball_spot.py path/to/clip.mov
     python tools/set_ball_spot.py --xy 830,675         # no window: give the ball centre in pixels
     python tools/set_ball_spot.py --clear              # back to searching the whole frame
+    python tools/set_ball_spot.py --xy 830,675 --diameter-px 31   # also set the speed scale by hand
 
 Record any short slo-mo clip with the ball on the tee mark (a practice swing that misses is
 fine — the frame shown is from early in the clip). Click the ball; it snaps to the ball's
 outline. Enter/Space saves, R retries, Esc cancels. Saved to logs/ball_spot.json and picked up
 by tools/watch_and_send.py on the next shot. Re-run whenever the tripod or tee mark moves.
+
+It also measures the ball's size at the spot (median over ~40 address frames) and saves the
+session speed scale (px/mm), used for every shot instead of a noisy per-shot estimate.
 """
 import argparse
 import json
@@ -25,7 +29,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from vision.calibration import white_blob_candidates  # noqa: E402
+from vision.calibration import BALL_DIAMETER_MM, refine_ball_radius, white_blob_candidates  # noqa: E402
 
 SPOT_FILE = ROOT / "logs" / "ball_spot.json"
 VIDEO_EXTS = {".mov", ".mp4", ".m4v"}
@@ -54,6 +58,53 @@ def read_frame(clip: Path, fraction: float = 0.15) -> np.ndarray:
     return frame
 
 
+def read_frames(clip: Path, start: float = 0.05, stop: float = 0.45, n: int = 40) -> list[np.ndarray]:
+    """n frames evenly spaced over [start, stop] of the clip (the ball sits at address there)."""
+    cap = cv2.VideoCapture(str(clip))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
+    want = set(np.linspace(total * start, total * stop, n).astype(int))
+    frames, i = [], 0
+    while i <= max(want):
+        ok, f = cap.read()
+        if not ok:
+            break
+        if i in want:
+            frames.append(f)
+        i += 1
+    cap.release()
+    return frames
+
+
+RADIUS_GUESSES = (10.0, 13.0, 16.0, 20.0, 25.0, 31.0, 38.0)  # px; each searches ±25–30%
+
+
+def agreed_radius(radii: list[float | None], tol: float = 0.06) -> float | None:
+    """
+    The radius most of the overlapping guesses agree on (within tol); ties → the smaller.
+
+    A guess far above the true size fits a bigger circle (ball + shadow, ~2× on 2026-11-13);
+    guesses near the true size all land on the ball, so agreement picks it out.
+    """
+    vals = sorted(r for r in radii if r is not None)
+    if not vals:
+        return None
+    # sorted ascending, so max() keeps the first (smallest) of equally supported values
+    anchor = max(vals, key=lambda r: sum(abs(v - r) <= tol * r for v in vals))
+    return float(np.median([v for v in vals if abs(v - anchor) <= tol * anchor]))
+
+
+def measure_radius(clip: Path, x: float, y: float) -> float | None:
+    """
+    Ball radius (px) at the spot: median Hough fit over ~40 address frames, for a ladder of
+    starting sizes, keeping the size they agree on (agreed_radius).
+
+    One frame's fit scatters ±10% (shade, alignment line, clubhead beside the ball); the median
+    over ~40 frames is stable (2026-11-13: 31.7 px diameter, matching a manual measure).
+    """
+    frames = read_frames(clip)
+    return agreed_radius([refine_ball_radius(frames, x, y, g) for g in RADIUS_GUESSES])
+
+
 def snap_to_ball(frame: np.ndarray, x: float, y: float) -> tuple[float, float, float, bool]:
     """
     Snap the click to the ball blob it landed on → (x, y, r, snapped).
@@ -72,14 +123,17 @@ def snap_to_ball(frame: np.ndarray, x: float, y: float) -> tuple[float, float, f
     return float(cx), float(cy), float(max(r, DEFAULT_R * 0.8)), True
 
 
-def save(x: float, y: float, r: float, clip: Path | None, frame_shape) -> None:
+def save(x: float, y: float, r: float, clip: Path | None, frame_shape, px_per_mm: float | None = None) -> None:
     SPOT_FILE.parent.mkdir(parents=True, exist_ok=True)
     SPOT_FILE.write_text(json.dumps({
         "x": round(x, 1), "y": round(y, 1), "r": round(r, 1),
+        "px_per_mm": round(px_per_mm, 4) if px_per_mm else None,
         "frame_w": frame_shape[1], "frame_h": frame_shape[0],
         "clip": str(clip) if clip else None, "saved": time.strftime("%Y-%m-%d %H:%M:%S"),
     }, indent=1))
-    print(f"Saved ball spot ({x:.0f}, {y:.0f}), r≈{r:.0f} px → {SPOT_FILE}")
+    print(f"Saved ball spot ({x:.0f}, {y:.0f}), r≈{r:.1f} px → {SPOT_FILE}")
+    print(f"Session scale: {px_per_mm:.3f} px/mm" if px_per_mm else
+          "No session scale (ball size not measured) — speed scale will be estimated per shot")
 
 
 def pick_interactively(frame: np.ndarray) -> tuple[float, float, float] | None:
@@ -121,6 +175,8 @@ def main() -> int:
     ap.add_argument("clip", nargs="?", help="Clip with the ball on the tee mark (default: newest in inbox/)")
     ap.add_argument("--xy", help="Ball centre as x,y in full-res pixels (skip the window)")
     ap.add_argument("--clear", action="store_true", help="Remove the calibrated spot")
+    ap.add_argument("--diameter-px", type=float, default=None,
+                    help="Ball diameter in full-res pixels, measured by hand (skips the automatic measure)")
     args = ap.parse_args()
 
     if args.clear:
@@ -145,7 +201,12 @@ def main() -> int:
             print("Cancelled — nothing saved.")
             return 1
         x, y, r = pick
-    save(x, y, r, clip, frame.shape)
+    measured = args.diameter_px / 2 if args.diameter_px else measure_radius(clip, x, y)
+    if measured is None:
+        print("Could not measure the ball's size — pass --diameter-px to set the speed scale.")
+    else:
+        r = measured
+    save(x, y, r, clip, frame.shape, px_per_mm=2 * measured / BALL_DIAMETER_MM if measured else None)
     return 0
 
 
